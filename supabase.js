@@ -12,40 +12,139 @@ const SUPABASE_ANON_KEY =
 // ===========================================
 
 // Inisialisasi Supabase client
+// FIX: Tambahkan realtime config untuk reconnection yang lebih baik di iOS
 const supabaseClient = window.supabase.createClient(
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
+  {
+    realtime: {
+      params: {
+        eventsPerSecond: 10,
+      },
+    },
+    db: {
+      schema: "public",
+    },
+  },
 );
+
+// ===========================================
+// iOS / DEVICE DETECTION
+// ===========================================
+
+/**
+ * Deteksi apakah device adalah iPhone (bukan iPad).
+ * iPhone TIDAK mendukung Fullscreen API.
+ */
+function isIPhone() {
+  try {
+    const ua = navigator.userAgent || navigator.vendor || "";
+    // iPhone detection: must have iPhone in UA but NOT iPad
+    return /iPhone/i.test(ua) && !/iPad/i.test(ua);
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Deteksi apakah device adalah iOS (iPhone atau iPad)
+ */
+function isIOS() {
+  try {
+    const ua = navigator.userAgent || navigator.vendor || "";
+    return /iPad|iPhone|iPod/i.test(ua);
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Deteksi apakah browser mendukung native Fullscreen API.
+ * iPhone Safari TIDAK mendukung ini.
+ */
+function supportsNativeFullscreen() {
+  if (isIPhone()) return false;
+  const el = document.documentElement;
+  return !!(
+    el.requestFullscreen ||
+    el.webkitRequestFullscreen ||
+    el.mozRequestFullScreen ||
+    el.msRequestFullscreen
+  );
+}
 
 // ===========================================
 // USER ID MANAGEMENT
 // ===========================================
+// FIX: Gunakan localStorage (bukan sessionStorage) agar user ID
+// tetap konsisten di iOS Safari yang sering reset sessionStorage.
+// Migrasi: coba sessionStorage dulu, lalu pindah ke localStorage.
 
 /**
- * Get atau buat user ID unik (disimpan di sessionStorage)
+ * Get atau buat user ID unik.
+ * Menggunakan localStorage agar persisten di iOS Safari.
  */
 function getUserId() {
-  let userId = sessionStorage.getItem("watchparty_user_id");
+  let userId = null;
+
+  // 1. Cek localStorage (primary)
+  try {
+    userId = localStorage.getItem("watchparty_user_id");
+  } catch (e) {
+    // localStorage might be blocked in private mode
+  }
+
+  // 2. Fallback ke sessionStorage (migrasi dari versi lama)
+  if (!userId) {
+    try {
+      userId = sessionStorage.getItem("watchparty_user_id");
+    } catch (e) {}
+  }
+
+  // 3. Buat baru kalau tidak ada
   if (!userId) {
     userId =
       "user_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9);
-    sessionStorage.setItem("watchparty_user_id", userId);
   }
+
+  // Simpan ke localStorage (dan sessionStorage sebagai backup)
+  try {
+    localStorage.setItem("watchparty_user_id", userId);
+  } catch (e) {}
+  try {
+    sessionStorage.setItem("watchparty_user_id", userId);
+  } catch (e) {}
+
   return userId;
 }
 
 /**
- * Simpan bahwa user ini adalah host dari room tertentu
+ * Simpan bahwa user ini adalah host dari room tertentu.
+ * Menggunakan localStorage agar persisten.
  */
 function setAsHost(roomId) {
-  sessionStorage.setItem(`watchparty_host_${roomId}`, "true");
+  try {
+    localStorage.setItem(`watchparty_host_${roomId}`, "true");
+  } catch (e) {}
+  try {
+    sessionStorage.setItem(`watchparty_host_${roomId}`, "true");
+  } catch (e) {}
 }
 
 /**
- * Cek apakah user ini adalah host dari room tertentu
+ * Cek apakah user ini adalah host dari room tertentu.
+ * Cek localStorage dulu, lalu sessionStorage (backward compat).
  */
 function isHostOfRoom(roomId) {
-  return sessionStorage.getItem(`watchparty_host_${roomId}`) === "true";
+  try {
+    if (localStorage.getItem(`watchparty_host_${roomId}`) === "true")
+      return true;
+  } catch (e) {}
+  try {
+    if (sessionStorage.getItem(`watchparty_host_${roomId}`) === "true")
+      return true;
+  } catch (e) {}
+  return false;
 }
 
 // ===========================================
@@ -55,20 +154,46 @@ function isHostOfRoom(roomId) {
 /**
  * Generate UUID v4
  */
+/**
+ * Generate short room ID — 6 karakter alphanumeric.
+ * Menggunakan karakter yang mudah dibaca dan diketik (tanpa O/0, I/l/1).
+ * Total kombinasi: 52^6 ≈ 19 miliar — collision sangat kecil.
+ */
+function generateShortId(length = 6) {
+  // Abaikan karakter yang mirip supaya ga bingung saat diketik
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
 function generateUUID() {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+  return generateShortId(6);
 }
 
 /**
  * Buat room baru di database
  */
 async function createRoom(videoUrl) {
-  const roomId = generateUUID();
   const hostId = getUserId();
+  let roomId = generateUUID();
+  let attempts = 0;
+  const MAX_ATTEMPTS = 5;
+
+  // Collision check — pastikan room ID belum dipakai
+  while (attempts < MAX_ATTEMPTS) {
+    const { data: existing } = await supabaseClient
+      .from("rooms")
+      .select("id")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (!existing) break; // ID belum dipakai, lanjut
+    roomId = generateUUID();
+    attempts++;
+  }
 
   const { data, error } = await supabaseClient
     .from("rooms")
@@ -170,18 +295,21 @@ async function deleteRoom(roomId) {
 }
 
 /**
- * Cek apakah user ini adalah host
+ * Cek apakah user ini adalah host.
+ * FIX: Migrasi host flag ke localStorage jika ditemukan di sessionStorage.
  */
 function checkIsHost(roomData) {
   const userId = getUserId();
 
-  // Cek dari sessionStorage (untuk backward compatibility)
+  // Cek dari localStorage/sessionStorage
   if (isHostOfRoom(roomData.id)) {
     return true;
   }
 
-  // Cek dari database
+  // Cek dari database (paling reliable)
   if (roomData.host_id && roomData.host_id === userId) {
+    // Migrasi: simpan ke localStorage juga
+    setAsHost(roomData.id);
     return true;
   }
 
@@ -269,7 +397,8 @@ async function unsubscribeFromRoom(channel) {
 // ===========================================
 
 /**
- * Subscribe to presence channel for viewer tracking
+ * Subscribe to presence channel for viewer tracking.
+ * FIX: Tambahkan reconnection logic & heartbeat untuk iOS.
  */
 function subscribeToPresence(roomId, userId, isHost, userName, callbacks) {
   const channel = supabaseClient.channel(`presence:${roomId}`, {
@@ -279,6 +408,9 @@ function subscribeToPresence(roomId, userId, isHost, userName, callbacks) {
       },
     },
   });
+
+  let heartbeatInterval = null;
+  let reconnectTimeout = null;
 
   channel
     .on("presence", { event: "sync" }, () => {
@@ -297,8 +429,16 @@ function subscribeToPresence(roomId, userId, isHost, userName, callbacks) {
         callbacks.onLeave(leftPresences);
       }
     })
-    .subscribe(async (status) => {
+    .subscribe(async (status, err) => {
+      console.log("[Presence] Status:", status);
+
       if (status === "SUBSCRIBED") {
+        // Clear reconnect timeout
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+          reconnectTimeout = null;
+        }
+
         // Track this user with name
         await channel.track({
           user_id: userId,
@@ -307,8 +447,45 @@ function subscribeToPresence(roomId, userId, isHost, userName, callbacks) {
           joined_at: new Date().toISOString(),
           online: true,
         });
+
+        // Heartbeat: re-track presence setiap 30 detik untuk menjaga koneksi di iOS
+        heartbeatInterval = setInterval(async () => {
+          try {
+            await channel.track({
+              user_id: userId,
+              user_name: userName || "Guest",
+              is_host: isHost,
+              joined_at: new Date().toISOString(),
+              online: true,
+            });
+          } catch (e) {
+            console.warn("[Presence] Heartbeat failed:", e);
+          }
+        }, 30000);
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        console.warn("[Presence] Connection error:", status, err);
+        // Auto-reconnect setelah 3 detik
+        if (reconnectTimeout) clearTimeout(reconnectTimeout);
+        reconnectTimeout = setTimeout(() => {
+          console.log("[Presence] Attempting reconnect...");
+          if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+          }
+          channel.subscribe();
+        }, 3000);
+      } else if (status === "CLOSED") {
+        // Bersihkan
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
       }
     });
+
+  // Simpan ref untuk cleanup
+  channel._heartbeatInterval = heartbeatInterval;
+  channel._reconnectTimeout = reconnectTimeout;
 
   return channel;
 }
@@ -327,6 +504,13 @@ async function updatePresence(channel, data) {
  */
 async function unsubscribeFromPresence(channel) {
   if (channel) {
+    // Bersihkan heartbeat
+    if (channel._heartbeatInterval) {
+      clearInterval(channel._heartbeatInterval);
+    }
+    if (channel._reconnectTimeout) {
+      clearTimeout(channel._reconnectTimeout);
+    }
     await channel.untrack();
     await supabaseClient.removeChannel(channel);
   }
@@ -464,6 +648,16 @@ function subscribeToSync(roomId, callbacks) {
         callbacks.onKnockResponse(payload.payload);
       }
     })
+    .on("broadcast", { event: "sync_request" }, (payload) => {
+      if (callbacks && callbacks.onSyncRequest) {
+        callbacks.onSyncRequest(payload.payload);
+      }
+    })
+    .on("broadcast", { event: "sync_response" }, (payload) => {
+      if (callbacks && callbacks.onSyncResponse) {
+        callbacks.onSyncResponse(payload.payload);
+      }
+    })
     .subscribe();
 
   return channel;
@@ -554,6 +748,39 @@ async function broadcastKnockResponse(
         target_user_id: targetUserId,
         approved: approved,
         host_name: hostName || "Host",
+        timestamp: Date.now(),
+      },
+    });
+  }
+}
+
+/**
+ * Broadcast sync request — guest asks host for current playback state
+ */
+async function broadcastSyncRequest(channel) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "sync_request",
+      payload: {
+        user_id: getUserId(),
+        timestamp: Date.now(),
+      },
+    });
+  }
+}
+
+/**
+ * Broadcast sync response — host sends current state to guest
+ */
+async function broadcastSyncResponse(channel, state) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "sync_response",
+      payload: {
+        status: state.status,
+        currentTime: state.currentTime,
         timestamp: Date.now(),
       },
     });
@@ -982,6 +1209,22 @@ const BAD_WORDS = [
   "ewe",
   "ewek",
   "meki",
+  "veveg",
+  "memeg",
+  "pepeq",
+  "vevek",
+  "fefek",
+  "kuntul",
+  "knt",
+  "memeq",
+  "vuki",
+  "puki",
+  "pukih",
+  "pukik",
+  "memk",
+  "mmk",
+  "nnk",
+  "nok",
 ];
 
 /**
@@ -1029,6 +1272,94 @@ function containsBadWordStrict(text) {
   return containsBadWord(text);
 }
 
+/**
+ * Sensor kata kotor di teks — mengganti dengan ***
+ * Logic: hapus dulu kata aman (anjir/anjay), baru cek dan replace bad words.
+ */
+function censorBadWords(text) {
+  if (!text || typeof text !== "string") return text;
+  let result = text;
+
+  // 1. Hapus kata aman yang mengandung "anj" supaya ga false positive
+  const safePlaceholders = [];
+  for (const safe of SAFE_ANJ_PATTERNS) {
+    const placeholder = `__SAFE_${safePlaceholders.length}__`;
+    while (result.toLowerCase().includes(safe.toLowerCase())) {
+      const idx = result.toLowerCase().indexOf(safe.toLowerCase());
+      result =
+        result.substring(0, idx) +
+        placeholder +
+        result.substring(idx + safe.length);
+    }
+    safePlaceholders.push({ placeholder, original: safe });
+  }
+
+  // 2. Replace bad words dengan ***
+  for (const bad of BAD_WORDS) {
+    const regex = new RegExp(bad.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    result = result.replace(regex, "***");
+  }
+
+  // 3. Restore kata aman
+  for (const { placeholder, original } of safePlaceholders) {
+    // Restore dengan case yang sesuai — cari placeholder case-insensitive
+    const restoreRegex = new RegExp(placeholder, "gi");
+    result = result.replace(restoreRegex, original);
+  }
+
+  return result;
+}
+
+// ===========================================
+// IOS FULLSCREEN HELPER
+// ===========================================
+
+/**
+ * Toggle fullscreen dengan fallback untuk iPhone.
+ * iPhone tidak mendukung requestFullscreen, jadi gunakan CSS-based fullscreen.
+ */
+function toggleIOSFullscreen(element) {
+  const videoEl = element.querySelector("video");
+
+  // Untuk HTML5 video di iPhone: gunakan webkitEnterFullscreen (native)
+  if (isIPhone() && videoEl) {
+    try {
+      if (typeof videoEl.webkitEnterFullscreen === "function") {
+        videoEl.webkitEnterFullscreen();
+        return true;
+      }
+      if (typeof videoEl.webkitEnterFullScreen === "function") {
+        videoEl.webkitEnterFullScreen();
+        return true;
+      }
+    } catch (e) {
+      console.warn("[Fullscreen] webkitEnterFullscreen failed:", e);
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Exit iOS fullscreen
+ */
+function exitIOSFullscreen(element) {
+  const videoEl = element ? element.querySelector("video") : null;
+  if (videoEl) {
+    try {
+      if (typeof videoEl.webkitExitFullscreen === "function") {
+        videoEl.webkitExitFullscreen();
+        return true;
+      }
+      if (typeof videoEl.webkitExitFullScreen === "function") {
+        videoEl.webkitExitFullScreen();
+        return true;
+      }
+    } catch (e) {}
+  }
+  return false;
+}
+
 // Export untuk digunakan di file lain
 window.watchParty = {
   supabase: supabaseClient,
@@ -1056,6 +1387,8 @@ window.watchParty = {
   broadcastKick,
   broadcastKnock,
   broadcastKnockResponse,
+  broadcastSyncRequest,
+  broadcastSyncResponse,
   unsubscribeFromSync,
   checkIsHost,
   checkRoomExpiry,
@@ -1092,4 +1425,11 @@ window.watchParty = {
   // Bad Word Filter
   containsBadWord,
   containsBadWordStrict,
+  censorBadWords,
+  // iOS Detection & Fullscreen Helpers
+  isIPhone,
+  isIOS,
+  supportsNativeFullscreen,
+  toggleIOSFullscreen,
+  exitIOSFullscreen,
 };

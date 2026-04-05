@@ -1022,7 +1022,7 @@
                 localStorage.setItem('watchparty_current_room_id', roomId);
             } catch(e) {}
             
-            roomIdDisplay.textContent = `Room: ${roomId.substring(0, 8)}...`;
+            roomIdDisplay.textContent = `Room: ${roomId}`;
             roomIdInput.value = roomId;
             shareUrlInput.value = window.location.href;
             
