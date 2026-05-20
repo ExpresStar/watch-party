@@ -88,6 +88,12 @@
                 <!-- Video Frame -->
                 <div class="video-frame">
                     <div class="video-wrapper" id="videoWrapper">
+                        <!-- Loading Overlay: tampil SEBELUM player siap, hilang saat onPlayerReady -->
+                        <div id="playerLoadingOverlay" style="display:none; position:absolute; inset:0; z-index:10; background:#111; background-size:cover; background-position:center; flex-direction:column; align-items:center; justify-content:center; gap:12px;">
+                            <div style="width:40px;height:40px;border:3px solid rgba(255,255,255,0.2);border-top-color:#6366f1;border-radius:50%;animation:wpSpin 0.7s linear infinite;"></div>
+                            <span style="color:#fff;font-size:0.85rem;opacity:0.7;">Memuat video...</span>
+                        </div>
+                        <style>@keyframes wpSpin{to{transform:rotate(360deg)}}</style>
                         <!-- For HTML5 Video -->
                         <video 
                             id="videoPlayer" 
@@ -476,11 +482,24 @@
         let lastUpdateTime = 0;
         let isLeavingPage = false;
         let isHost = false;
+        let isTempHost = false; // Track if user is temporary host (not original creator)
         let lastSyncTime = 0;
         let currentUserId = null;
         let currentUserName = null;
         let chatMessages = []; // Store recent messages for fullscreen
         let guestHasInteracted = false; // Track if guest has interacted (for autoplay)
+        let preFetchedRoomData = null; // Room data di-fetch sebelum user klik (untuk user gesture autoplay)
+        let ytPlayerCreatedInGesture = false; // Flag: player sudah di-create saat user gesture
+        
+        // PRESENCE DEBOUNCE — cegah false join/leave dari heartbeat blip
+        // Akar masalah: Supabase onJoin fires SETIAP heartbeat (30 detik), bukan hanya saat join pertama.
+        // Supabase onLeave fires saat heartbeat miss, bukan hanya saat user benar2 close tab.
+        // Solusi: track user yang sudah di-greet, hanya tampilkan notif SEKALI.
+        let greetedUsers = new Set(); // User ID yang sudah pernah ditampilkan notif "bergabung"
+        let leaveTimers = {}; // { userId: timerId } — delayed leave notification timers
+        let hostTransferTimers = {}; // { userId: timerId } — pending host transfer timers
+        const LEAVE_NOTIF_DELAY_MS = 12000; // 12 detik: tunggu benar-benar absent sebelum tampilkan "keluar"
+        const HOST_TRANSFER_GRACE_MS = 10000; // 10 detik grace sebelum trigger host transfer
         
         // SYNC SETTINGS - Fast, clean sync (no playback rate manipulation)
         const UPDATE_INTERVAL = 500; // Update setiap 500ms
@@ -492,6 +511,7 @@
         let playerType = 'html5';
         let youtubePlayer = null;
         let youtubeReady = false;
+        let youtubeTimeInterval = null; // Track interval to prevent leak
         
         // DOM Elements
         const videoPlayer = document.getElementById('videoPlayer');
@@ -628,32 +648,115 @@
             youtubeReady = true;
         }
         
-        function createYouTubePlayer(videoId) {
-            lastVideoId = videoId; // Track for force embed fallback
+        function createYouTubePlayer(videoId, autoPlay = false, startSeconds = 0) {
+            lastVideoId = videoId;
             youtubePlayerDiv.style.display = 'block';
             videoPlayer.style.display = 'none';
             
             youtubePlayerDiv.innerHTML = '';
             
+            // Tampilkan loading overlay dengan thumbnail YouTube
+            showPlayerLoading(videoId);
+            
+            // Build playerVars
+            const pv = {
+                'playsinline': 1,
+                'controls': 1,
+                'rel': 0,
+                'modestbranding': 1,
+                'origin': window.location.origin,
+                'widget_referrer': window.location.href,
+                'cc_load_policy': 1,
+                'cc_lang_pref': 'id'
+            };
+            // Start di posisi yang benar (skip seek terpisah = lebih cepat)
+            if (startSeconds > 1) {
+                pv.start = Math.floor(startSeconds);
+            }
+            // Guest autoplay: autoplay=1 TANPA mute=1
+            // Suara akan jalan karena player di-create saat user gesture + allow="autoplay" di iframe
+            if (!isHost && autoPlay) {
+                pv.autoplay = 1;
+                // TIDAK pakai mute=1 — sound tetap menyala!
+            }
+            
             youtubePlayer = new YT.Player('youtubePlayer', {
                 videoId: videoId,
                 width: '100%',
                 height: '100%',
-                playerVars: {
-                    'playsinline': 1,
-                    'controls': 1,
-                    'rel': 0,
-                    'modestbranding': 1,
-                    'origin': window.location.origin,
-                    'widget_referrer': window.location.href,
-                    'cc_load_policy': 1,      // Subtitle ON by default
-                    'cc_lang_pref': 'id'       // Bahasa Indonesia
-                },
+                playerVars: pv,
                 events: {
                     'onReady': onPlayerReady,
                     'onStateChange': onPlayerStateChange,
                     'onError': onPlayerError
                 }
+            });
+            
+            // KRITIS: Set allow="autoplay" pada iframe yang baru dibuat YT.Player
+            // Ini mendelegasikan izin autoplay dari halaman ke YouTube iframe
+            // sehingga browser mengizinkan autoplay dengan suara
+            const ytIframe = youtubePlayerDiv.querySelector('iframe');
+            if (ytIframe) {
+                ytIframe.setAttribute('allow', 'autoplay; encrypted-media; fullscreen; picture-in-picture');
+            }
+        }
+        
+        // Tampilkan loading overlay dengan thumbnail YouTube
+        function showPlayerLoading(videoId) {
+            const overlay = document.getElementById('playerLoadingOverlay');
+            if (!overlay) return;
+            
+            // Set thumbnail sebagai background
+            if (videoId) {
+                overlay.style.backgroundImage = `url(https://img.youtube.com/vi/${videoId}/hqdefault.jpg)`;
+                overlay.style.backgroundColor = '#111';
+            }
+            overlay.style.display = 'flex';
+        }
+        
+        // Sembunyikan loading overlay
+        function hidePlayerLoading() {
+            const overlay = document.getElementById('playerLoadingOverlay');
+            if (overlay) {
+                overlay.style.display = 'none';
+                overlay.style.backgroundImage = '';
+            }
+        }
+        
+        // Cek apakah guest perlu autoplay (host sedang play)
+        function shouldAutoPlayGuest() {
+            return roomData && roomData.status === 'play';
+        }
+        
+        // Tampilkan overlay "Mulai Nonton" untuk returning guest
+        // Guest klik → player create dengan user gesture → autoplay WITH SOUND
+        function showStartWatchingOverlay(videoId) {
+            const overlay = document.getElementById('playerLoadingOverlay');
+            if (!overlay) return;
+            
+            // Set thumbnail sebagai background
+            overlay.style.backgroundImage = `url(https://img.youtube.com/vi/${videoId}/hqdefault.jpg)`;
+            overlay.style.backgroundColor = '#111';
+            overlay.innerHTML = `
+                <div style="display:flex;flex-direction:column;align-items:center;gap:14px;cursor:pointer;" id="startWatchingBtn">
+                    <div style="width:64px;height:64px;background:rgba(99,102,241,0.9);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(99,102,241,0.4);">
+                        <svg width="30" height="30" viewBox="0 0 24 24" fill="white"><polygon points="9,6 20,12 9,18"></polygon></svg>
+                    </div>
+                    <span style="color:#fff;font-size:1.05rem;font-weight:600;">Mulai Nonton</span>
+                    <span style="color:rgba(255,255,255,0.6);font-size:0.8rem;">Klik untuk bergabung menonton</span>
+                </div>
+            `;
+            overlay.style.display = 'flex';
+            
+            // Event: klik → create player dengan user gesture
+            document.getElementById('startWatchingBtn').addEventListener('click', () => {
+                const shouldAutoPlay = roomData.status === 'play';
+                const startPosSec = roomData.current_time_sec || 0;
+                
+                // Create player saat user gesture — autoplay WITH SOUND
+                createYouTubePlayer(videoId, shouldAutoPlay, startPosSec);
+                
+                showSyncIndicator('▶️ Syncing...');
             });
         }
         
@@ -666,6 +769,7 @@
 
         function onPlayerError(event) {
             console.error('YouTube Player Error:', event.data);
+            hidePlayerLoading();
             const errorCode = event.data;
             const videoId = lastVideoId || getYouTubeVideoId(roomData?.video_url);
             
@@ -735,7 +839,8 @@
         
         function onPlayerReady(event) {
             console.log('YouTube Player Ready');
-            // Sembunyikan fallback kalau player berhasil
+            // Sembunyikan loading overlay & fallback
+            hidePlayerLoading();
             const fallbackEl = document.getElementById('ytFallback');
             if (fallbackEl) fallbackEl.style.display = 'none';
             
@@ -754,7 +859,6 @@
                 subtitleEnabled = true;
                 updateSubtitleBtn();
             } catch(e) {
-                // Fallback: cc_load_policy di playerVars sudah handle
                 console.log('Caption setOption not available, using default');
             }
             
@@ -764,14 +868,32 @@
                 isSyncing = true;
                 initialGuestSyncDone = false;
                 
-                // Seek ke posisi host (pakai data dari DB sebagai initial)
+                // Seek ke posisi host HANYA kalau startSeconds tidak akurat
+                // (startSeconds di playerVars sudah handle start awal)
                 if (roomData.current_time_sec > 0) {
-                    youtubePlayer.seekTo(roomData.current_time_sec, true);
+                    const currentPos = youtubePlayer.getCurrentTime() || 0;
+                    const diff = Math.abs(currentPos - roomData.current_time_sec);
+                    if (diff > 3) {
+                        // Beda > 3 detik — seek ke posisi yang lebih akurat
+                        youtubePlayer.seekTo(roomData.current_time_sec, true);
+                    }
                 }
                 
                 // Play/pause sesuai status host
                 if (roomData.status === 'play') {
-                    youtubePlayer.playVideo();
+                    // autoplay=1 TANPA mute sudah di playerVars
+                    // Player di-create saat user gesture + allow="autoplay" di iframe
+                    // → video seharusnya sudah auto-play DENGAN SUARA
+                    
+                    // Cek apakah autoplay berhasil
+                    setTimeout(() => {
+                        try {
+                            if (youtubePlayer && youtubePlayer.getPlayerState && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                // Autoplay gagal — coba playVideo() sekali lagi
+                                youtubePlayer.playVideo();
+                            }
+                        } catch(e) {}
+                    }, 800);
                 } else {
                     youtubePlayer.pauseVideo();
                 }
@@ -781,26 +903,38 @@
                     window.watchParty.broadcastSyncRequest(syncChannel);
                 }
                 
-                // Release flag cepat — player sudah ready, ga perlu tunggu lama
+                // Release flag lebih cepat (1 detik, bukan 2)
                 setTimeout(() => {
                     isSyncing = false;
                     initialGuestSyncDone = true;
-                }, 300);
+                }, 1000);
             } else {
                 // HOST: Set initial time & state
                 if (roomData && roomData.current_time_sec > 0) {
                     youtubePlayer.seekTo(roomData.current_time_sec, true);
                 }
                 if (roomData && roomData.status === 'play') {
-                    youtubePlayer.playVideo();
+                    try { youtubePlayer.playVideo(); } catch(e) {}
+                    setTimeout(() => {
+                        try {
+                            if (youtubePlayer && youtubePlayer.getPlayerState && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                youtubePlayer.playVideo();
+                            }
+                        } catch(e) {}
+                        if (isSyncing) isSyncing = false;
+                    }, 1500);
+                } else if (isSyncing) {
+                    isSyncing = false;
                 }
             }
             
             // Fetch thumbnail color for glow effect
             setTimeout(fetchYouTubeThumbnailColor, 500);
             
-            // Start time update interval
-            setInterval(updateYouTubeTimeDisplay, UPDATE_INTERVAL);
+            // Start time update interval (clear previous if any to prevent leak)
+            if (youtubeTimeInterval) clearInterval(youtubeTimeInterval);
+            youtubeTimeInterval = setInterval(updateYouTubeTimeDisplay, UPDATE_INTERVAL);
+            youtubeReady = true;
         }
         
         function onPlayerStateChange(event) {
@@ -972,6 +1106,28 @@
             // Hide modal
             document.getElementById('nameModal').style.display = 'none';
             
+            // ===== GUEST: Create YouTube player SAAT INI (user gesture!) =====
+            // Ini KUNCI untuk autoplay dengan suara — browser butuh user gesture
+            // Karena kita pre-fetch room data, kita bisa create player langsung
+            const data = preFetchedRoomData;
+            if (data && currentUserId !== data.host_id && isYouTubeUrl(data.video_url)) {
+                const videoId = getYouTubeVideoId(data.video_url);
+                const shouldAutoPlay = data.status === 'play';
+                const startPosSec = data.current_time_sec || 0;
+                
+                if (videoId && youtubeReady) {
+                    // Set global state yang dibutuhkan onPlayerReady
+                    roomData = data;
+                    isHost = false;
+                    playerType = 'youtube';
+                    ytPlayerCreatedInGesture = true;
+                    
+                    // Create player NOW — masih dalam konteks user gesture (click)
+                    // autoplay=1 + allow="autoplay" → browser izinkan autoplay WITH SOUND
+                    createYouTubePlayer(videoId, shouldAutoPlay, startPosSec);
+                }
+            }
+            
             // Proceed to load room (checks kick status, then loads)
             proceedToLoadRoom();
         }
@@ -1028,9 +1184,21 @@
             
             currentUserId = window.watchParty.getUserId();
             
+            // ===== PRE-FETCH room data SEBELUM user interaction =====
+            // Jadi saat user klik "Lanjutkan", player bisa di-create langsung
+            // dalam konteks user gesture (untuk autoplay with sound)
+            try {
+                preFetchedRoomData = await window.watchParty.getRoom(roomId);
+            } catch(e) {
+                console.log('Pre-fetch room failed, will retry in loadRoom');
+            }
+            
             // Check if user already has a name
             if (checkUserName()) {
-                // Name already set — go straight to room
+                // Name already set — returning guest
+                if (preFetchedRoomData) {
+                    isHost = window.watchParty.checkIsHost(preFetchedRoomData);
+                }
                 await proceedToLoadRoom();
             }
             // Else: name modal is shown by checkUserName(), saveNameAndStart will call proceedToLoadRoom
@@ -1038,7 +1206,13 @@
 
         async function loadRoom() {
             try {
-                roomData = await window.watchParty.getRoom(roomId);
+                // Gunakan pre-fetched data jika sudah ada (lebih cepat)
+                if (preFetchedRoomData) {
+                    roomData = preFetchedRoomData;
+                    preFetchedRoomData = null;
+                } else {
+                    roomData = await window.watchParty.getRoom(roomId);
+                }
                 
                 if (!roomData) {
                     showError('Room tidak ditemukan.');
@@ -1067,6 +1241,10 @@
                     document.getElementById('hostBadge').style.display = 'inline-block';
                     document.getElementById('shareContainer').style.display = 'block';
                     showStatus('👑 Kamu adalah HOST. Kontrol video untuk semua peserta.', 'success');
+                    
+                    // Suppress broadcasts during initial sync (rejoin scenario)
+                    // Will be released after sync with current controller completes
+                    isSyncing = true;
                 } else {
                     // Hide queue controls for guests
                     document.getElementById('queueActions').style.display = 'none';
@@ -1092,22 +1270,75 @@
                     // Set player type SEBELUM create player — ini KRITIS untuk sync
                     playerType = 'youtube';
                     
-                    // Load YouTube via iframe directly
-                    const checkYT = setInterval(() => {
-                        if (youtubeReady) {
-                            clearInterval(checkYT);
-                            createYouTubePlayer(videoId);
+                    if (ytPlayerCreatedInGesture) {
+                        // Player SUDAH di-create saat user klik "Lanjutkan"
+                        // Skip re-creation — lanjut ke host rejoin sync
+                        ytPlayerCreatedInGesture = false;
+                        
+                        // === ORIGINAL HOST REJOIN: silent sync ===
+                        if (isHost && !isTempHost) {
+                            setTimeout(() => {
+                                const presenceState = window.currentPresenceState || {};
+                                const otherUsers = Object.keys(presenceState).filter(id => id !== currentUserId);
+                                if (otherUsers.length > 0) {
+                                    showSyncIndicator('🔄 Menyinkronkan...');
+                                    if (syncChannel) window.watchParty.broadcastSyncRequest(syncChannel);
+                                    setTimeout(() => {
+                                        isSyncing = false;
+                                        if (syncChannel) window.watchParty.broadcastHostReclaim(syncChannel, currentUserId);
+                                        showSyncIndicator('👑 Host kembali! Kontrol video dikembalikan.');
+                                    }, 3000);
+                                } else {
+                                    isSyncing = false;
+                                }
+                            }, 1500);
                         }
-                    }, 100);
-                    
-                    setTimeout(() => {
-                        if (!youtubeReady) {
-                            showStatus('YouTube API loading...', 'success');
-                        }
-                    }, 3000);
+                    } else if (!isHost && shouldAutoPlayGuest()) {
+                        // Returning guest — tampilkan "Mulai Nonton" overlay
+                        // 1 klik → player create dengan autoplay + suara (user gesture)
+                        showStartWatchingOverlay(videoId);
+                    } else {
+                        // Normal flow (host, atau guest yang pause)
+                        const shouldAutoPlay = roomData.status === 'play';
+                        const startPosSec = roomData.current_time_sec || 0;
+                        showPlayerLoading(videoId);
+                        
+                        const checkYT = setInterval(() => {
+                            if (youtubeReady) {
+                                clearInterval(checkYT);
+                                createYouTubePlayer(videoId, shouldAutoPlay, startPosSec);
+                                
+                                // === ORIGINAL HOST REJOIN: silent sync ===
+                                if (isHost && !isTempHost) {
+                                    setTimeout(() => {
+                                        const presenceState = window.currentPresenceState || {};
+                                        const otherUsers = Object.keys(presenceState).filter(id => id !== currentUserId);
+                                        if (otherUsers.length > 0) {
+                                            showSyncIndicator('🔄 Menyinkronkan...');
+                                            if (syncChannel) window.watchParty.broadcastSyncRequest(syncChannel);
+                                            setTimeout(() => {
+                                                isSyncing = false;
+                                                if (syncChannel) window.watchParty.broadcastHostReclaim(syncChannel, currentUserId);
+                                                showSyncIndicator('👑 Host kembali! Kontrol video dikembalikan.');
+                                            }, 3000);
+                                        } else {
+                                            isSyncing = false;
+                                        }
+                                    }, 1500);
+                                }
+                            }
+                        }, 100);
+                        
+                        setTimeout(() => {
+                            if (!youtubeReady) {
+                                showStatus('YouTube API loading...', 'success');
+                            }
+                        }, 3000);
+                    }
                     
                 } else if (isGoogleDriveUrl(videoUrl)) {
                     // === GOOGLE DRIVE — pakai iframe preview ===
+                    hidePlayerLoading();
                     playerType = 'gdrive';
                     const fileId = getGoogleDriveFileId(videoUrl);
                     if (fileId) {
@@ -1120,6 +1351,7 @@
                     
                 } else {
                     // HTML5 Video (MP4 langsung, dll)
+                    hidePlayerLoading();
                     playerType = 'html5';
                     videoPlayer.style.display = 'block';
                     youtubePlayerDiv.style.display = 'none';
@@ -1172,6 +1404,32 @@
                         // Host: set initial time
                         if (roomData.current_time_sec > 0) {
                             videoPlayer.currentTime = roomData.current_time_sec;
+                        }
+                        
+                        // === ORIGINAL HOST REJOIN: silent sync ===
+                        if (!isTempHost) {
+                            setTimeout(() => {
+                                const presenceState = window.currentPresenceState || {};
+                                const otherUsers = Object.keys(presenceState).filter(id => id !== currentUserId);
+                                
+                                if (otherUsers.length > 0) {
+                                    showSyncIndicator('🔄 Menyinkronkan...');
+                                    if (syncChannel) {
+                                        window.watchParty.broadcastSyncRequest(syncChannel);
+                                    }
+                                    setTimeout(() => {
+                                        isSyncing = false;
+                                        if (syncChannel) {
+                                            window.watchParty.broadcastHostReclaim(syncChannel, currentUserId);
+                                        }
+                                        showSyncIndicator('👑 Host kembali! Kontrol video dikembalikan.');
+                                    }, 3000);
+                                } else {
+                                    isSyncing = false;
+                                }
+                            }, 1500);
+                        } else {
+                            isSyncing = false;
                         }
                     }
                 }
@@ -1245,20 +1503,97 @@
                         updateViewersDisplay(state);
                     },
                     onJoin: (newPresences) => {
-                        // Someone joined
                         newPresences.forEach(presence => {
                             if (presence.user_id !== currentUserId) {
+                                const uid = presence.user_id;
                                 const name = presence.user_name || 'Guest';
-                                showSyncIndicator(`👋 ${name} bergabung!`);
+                                
+                                // CANCEL: kalau user ini punya pending leave timer, batalkan
+                                // (user dianggap "keluar" tapi ternyata masih ada — heartbeat recover)
+                                if (leaveTimers[uid]) {
+                                    clearTimeout(leaveTimers[uid]);
+                                    delete leaveTimers[uid];
+                                }
+                                // CANCEL: kalau host yang "keluar" ternyata balik, batalkan host transfer
+                                if (hostTransferTimers[uid]) {
+                                    clearTimeout(hostTransferTimers[uid]);
+                                    delete hostTransferTimers[uid];
+                                }
+                                
+                                // NOTIF: hanya tampilkan "bergabung" SEKALI per session
+                                // (Supabase onJoin fires setiap heartbeat update, bukan hanya join pertama)
+                                if (!greetedUsers.has(uid)) {
+                                    greetedUsers.add(uid);
+                                    showSyncIndicator(`👋 ${name} bergabung!`);
+                                }
                             }
                         });
                     },
                     onLeave: (leftPresences) => {
-                        // Someone left
                         leftPresences.forEach(presence => {
                             if (presence.user_id !== currentUserId) {
+                                const uid = presence.user_id;
                                 const name = presence.user_name || 'Guest';
-                                showSyncIndicator(`👋 ${name} keluar`);
+                                
+                                // CANCEL: batalkan leave timer sebelumnya kalau ada (leave berulang)
+                                if (leaveTimers[uid]) {
+                                    clearTimeout(leaveTimers[uid]);
+                                }
+                                
+                                // DELAYED LEAVE NOTIF: tunggu 12 detik, baru cek benar2 absent
+                                // Kalau user heartbeat recover dalam 12 detik, timer dibatalkan di onJoin
+                                leaveTimers[uid] = setTimeout(() => {
+                                    delete leaveTimers[uid];
+                                    
+                                    // DOUBLE-CHECK: apakah user BENAR-BENAR masih absen dari presence?
+                                    const currentState = window.currentPresenceState || {};
+                                    if (currentState[uid]) {
+                                        // User sudah kembali (heartbeat recover) — jangan tampilkan notif
+                                        return;
+                                    }
+                                    
+                                    // User benar-benar keluar — tampilkan notif dan hapus dari greetedUsers
+                                    greetedUsers.delete(uid);
+                                    showSyncIndicator(`👋 ${name} keluar`);
+                                    
+                                    // === AUTO HOST TRANSFER ===
+                                    if (presence.is_host) {
+                                        if (isHost) return; // Already host
+                                        
+                                        const hasHost = Object.values(currentState).some(
+                                            presences => presences.some(p => p.is_host)
+                                        );
+                                        
+                                        if (!hasHost) {
+                                            checkAndPromoteSelf();
+                                        }
+                                    }
+                                }, LEAVE_NOTIF_DELAY_MS);
+                                
+                                // === HOST TRANSFER: separate timer (lebih lama, 10 detik) ===
+                                if (presence.is_host) {
+                                    if (hostTransferTimers[uid]) {
+                                        clearTimeout(hostTransferTimers[uid]);
+                                    }
+                                    
+                                    hostTransferTimers[uid] = setTimeout(() => {
+                                        delete hostTransferTimers[uid];
+                                        
+                                        if (isHost) return;
+                                        
+                                        // DOUBLE-CHECK
+                                        const currentState = window.currentPresenceState || {};
+                                        if (currentState[uid]) return; // Host sudah kembali
+                                        
+                                        const hasHost = Object.values(currentState).some(
+                                            presences => presences.some(p => p.is_host)
+                                        );
+                                        
+                                        if (!hasHost) {
+                                            checkAndPromoteSelf();
+                                        }
+                                    }, HOST_TRANSFER_GRACE_MS);
+                                }
                             }
                         });
                     }
@@ -1445,6 +1780,105 @@
                 }
             }
         });
+        
+        // ===========================================
+        // AUTO HOST TRANSFER — guest becomes temp host when original host leaves
+        // ===========================================
+        
+        function becomeTemporaryHost() {
+            if (isHost) return;
+            
+            isHost = true;
+            isTempHost = true;
+            
+            // Show host UI
+            document.getElementById('hostBadge').style.display = 'inline-block';
+            document.getElementById('shareContainer').style.display = 'block';
+            document.getElementById('queueActions').style.display = '';
+            document.getElementById('queueClearBtn').style.display = '';
+            document.getElementById('queueEmptyText').textContent = 'Belum ada video dalam antrian. Tambahkan video!';
+            
+            // Update presence to show host status
+            if (presenceChannel) {
+                window.watchParty.updatePresence(presenceChannel, {
+                    user_id: currentUserId,
+                    user_name: currentUserName || 'Guest',
+                    is_host: true,
+                    joined_at: new Date().toISOString(),
+                    online: true,
+                });
+            }
+            
+            showStatus('👑 Kamu menjadi HOST sementara karena host sebelumnya keluar.', 'success');
+            showSyncIndicator('👑 Kamu sekarang menjadi host sementara!');
+            
+            // Render queue with host controls visible
+            renderQueue();
+        }
+        
+        function demoteFromHost(originalHostId) {
+            if (!isTempHost) return;
+            
+            isHost = false;
+            isTempHost = false;
+            
+            // Hide host UI
+            document.getElementById('hostBadge').style.display = 'none';
+            document.getElementById('shareContainer').style.display = 'none';
+            document.getElementById('queueActions').style.display = 'none';
+            document.getElementById('queueClearBtn').style.display = 'none';
+            document.getElementById('queueEmptyText').textContent = 'Belum ada video dalam antrian.';
+            
+            // Update presence
+            if (presenceChannel) {
+                window.watchParty.updatePresence(presenceChannel, {
+                    user_id: currentUserId,
+                    user_name: currentUserName || 'Guest',
+                    is_host: false,
+                    joined_at: new Date().toISOString(),
+                    online: true,
+                });
+            }
+            
+            showStatus('👀 Host asli kembali. Kamu kembali menjadi GUEST.', 'success');
+            showSyncIndicator('👑 Host asli kembali! Kontrol video dikembalikan.');
+            
+            // Re-render queue (hide host controls)
+            renderQueue();
+        }
+        
+        function checkAndPromoteSelf() {
+            if (isHost) return;
+            
+            const currentState = window.currentPresenceState || {};
+            const myPresence = currentState[currentUserId];
+            if (!myPresence || !myPresence.length) return;
+            const myJoinTime = new Date(myPresence[0].joined_at);
+            
+            // Check if there are other users
+            const otherUsers = Object.entries(currentState)
+                .filter(([id]) => id !== currentUserId)
+                .map(([id, presences]) => ({
+                    id,
+                    joined_at: new Date(presences[0].joined_at),
+                    is_host: presences[0].is_host
+                }))
+                .filter(u => !u.is_host);
+            
+            if (otherUsers.length === 0) {
+                // I'm the only non-host user remaining → become host
+                becomeTemporaryHost();
+                return;
+            }
+            
+            // Am I the oldest guest? (earliest joined_at) → become host
+            const earliestOther = otherUsers.reduce((earliest, u) => 
+                u.joined_at < earliest.joined_at ? u : earliest, otherUsers[0]);
+            
+            if (myJoinTime <= earliestOther.joined_at) {
+                becomeTemporaryHost();
+            }
+        }
         
         // ===========================================
         // KICK FEATURE
@@ -1781,6 +2215,24 @@
                 },
                 onKnock: (data) => {
                     handleKnockRequest(data);
+                },
+                onHostTransfer: (data) => {
+                    if (data.new_host_id === currentUserId) {
+                        // I've been chosen as the new temp host
+                        becomeTemporaryHost();
+                    } else {
+                        showSyncIndicator(`👑 ${data.new_host_name || 'Guest'} menjadi host sementara.`);
+                    }
+                },
+                onHostReclaim: (data) => {
+                    if (data.original_host_id === currentUserId) {
+                        // I'm the original host reclaiming — nothing to do, I'm already host
+                    } else if (isTempHost) {
+                        // I was temp host, original host is back — step down
+                        demoteFromHost(data.original_host_id);
+                    } else {
+                        showSyncIndicator('👑 Host asli kembali! Kontrol video dikembalikan.');
+                    }
                 }
             });
         }
@@ -1811,7 +2263,15 @@
                 }
                 
                 if (data.status === 'play') {
-                    youtubePlayer.playVideo();
+                    // Robust play: try immediate, then retry after delay
+                    try { youtubePlayer.playVideo(); } catch(e) {}
+                    setTimeout(() => {
+                        try {
+                            if (youtubePlayer && youtubePlayer.getPlayerState && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                youtubePlayer.playVideo();
+                            }
+                        } catch(e) {}
+                    }, 1000);
                     statusDot.classList.remove('paused');
                     statusText.textContent = 'Playing';
                 } else {
@@ -1881,7 +2341,15 @@
                     }
                 }
                 if (data.status === 'play') {
-                    youtubePlayer.playVideo();
+                    // Robust play: try immediate, then retry after delay
+                    try { youtubePlayer.playVideo(); } catch(e) {}
+                    setTimeout(() => {
+                        try {
+                            if (youtubePlayer && youtubePlayer.getPlayerState && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                youtubePlayer.playVideo();
+                            }
+                        } catch(e) {}
+                    }, 1000);
                     statusDot.classList.remove('paused');
                     statusText.textContent = 'Playing';
                 } else {
@@ -1942,7 +2410,15 @@
                 
                 // Sync status play/pause
                 if (targetStatus === 'play' && !isPlaying) {
-                    youtubePlayer.playVideo();
+                    // Robust play: try immediate, then retry
+                    try { youtubePlayer.playVideo(); } catch(e) {}
+                    setTimeout(() => {
+                        try {
+                            if (youtubePlayer && youtubePlayer.getPlayerState && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                youtubePlayer.playVideo();
+                            }
+                        } catch(e) {}
+                    }, 1000);
                     statusDot.classList.remove('paused');
                     statusText.textContent = 'Playing';
                 } else if (targetStatus === 'pause' && isPlaying) {
@@ -2370,8 +2846,18 @@
         
         function setupVideoListeners() {
             enableAudioBtn.addEventListener('click', () => {
+                // Unmute HTML5 video
                 videoPlayer.muted = false;
                 videoPlayer.volume = 1;
+                
+                // Unmute YouTube player
+                if (youtubePlayer && youtubePlayer.unMute) {
+                    try {
+                        youtubePlayer.unMute();
+                        youtubePlayer.setVolume(100);
+                    } catch(e) {}
+                }
+                
                 enableAudioBtn.style.display = 'none';
                 guestHasInteracted = true; // User sudah interact, selanjutnya boleh play dengan suara
             });
@@ -3141,9 +3627,14 @@
                     renderQueue();
                 },
                 onPlayNext: (data) => {
+                    // Set flag supaya onPlayerStateChange tidak revert
+                    isSyncing = true;
+                    initialGuestSyncDone = false;
                     // Load and play next video
                     loadVideo(data.video_url, true); // true = autoPlay
                     showSyncIndicator(`▶️ Memutar video berikutnya...`);
+                    // Release flag setelah player siap
+                    setTimeout(() => { isSyncing = false; }, 5000);
                 },
                 onQueueRequest: (data) => {
                     // Host receives request from guest - send full queue
@@ -3351,6 +3842,10 @@
             // Broadcast play next to all viewers
             window.watchParty.broadcastPlayNext(queueChannel, nextItem.video_url);
             
+            // Set flag supaya onPlayerStateChange tidak revert saat ganti video
+            isSyncing = true;
+            youtubeReady = false;
+            
             // Load video with autoPlay
             loadVideo(nextItem.video_url, true);
             
@@ -3396,6 +3891,7 @@
                 
             } else if (isGoogleDriveUrl(videoUrl)) {
                 // === GOOGLE DRIVE — pakai iframe preview ===
+                hidePlayerLoading();
                 playerType = 'gdrive';
                 const fileId = getGoogleDriveFileId(videoUrl);
                 if (fileId) {
@@ -3407,6 +3903,7 @@
                 
             } else {
                 // HTML5 Video (MP4 langsung, dll)
+                hidePlayerLoading();
                 playerType = 'html5';
                 videoPlayer.style.display = 'block';
                 youtubePlayerDiv.style.display = 'none';
@@ -3441,6 +3938,9 @@
             videoPlayer.style.display = 'none';
             youtubePlayerDiv.style.display = 'block';
             
+            // Tampilkan loading overlay dengan thumbnail
+            showPlayerLoading(videoId);
+            
             // Create new YouTube player
             youtubePlayerDiv.innerHTML = '';
             youtubePlayer = new YT.Player('youtubePlayer', {
@@ -3458,15 +3958,63 @@
                 },
                 events: {
                     'onReady': (event) => {
-                        console.log('YouTube Player Ready');
+                        console.log('YouTube Player Ready, autoPlay:', autoPlay);
+                        // Sembunyikan loading overlay
+                        hidePlayerLoading();
                         const fallbackEl = document.getElementById('ytFallback');
                         if (fallbackEl) fallbackEl.style.display = 'none';
                         
-                        setTimeout(fetchYouTubeThumbnailColor, 500);
-                        if (autoPlay) {
-                            youtubePlayer.playVideo();
+                        // Set allow="autoplay" pada iframe
+                        const ytIframe = youtubePlayerDiv.querySelector('iframe');
+                        if (ytIframe) {
+                            ytIframe.setAttribute('allow', 'autoplay; encrypted-media; fullscreen; picture-in-picture');
                         }
-                        setInterval(updateYouTubeTimeDisplay, UPDATE_INTERVAL);
+                        
+                        setTimeout(fetchYouTubeThumbnailColor, 500);
+                        
+                        // Clear previous interval & create new one (prevent leak)
+                        if (youtubeTimeInterval) clearInterval(youtubeTimeInterval);
+                        youtubeTimeInterval = setInterval(updateYouTubeTimeDisplay, UPDATE_INTERVAL);
+                        
+                        // Robust autoplay: try multiple times with increasing delay
+                        if (autoPlay) {
+                            // Attempt 1: immediate
+                            try { youtubePlayer.playVideo(); } catch(e) { console.log('Autoplay attempt 1 failed:', e); }
+                            
+                            // Attempt 2: after 500ms (player might need more time)
+                            setTimeout(() => {
+                                try {
+                                    if (youtubePlayer && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                        youtubePlayer.playVideo();
+                                        console.log('Autoplay attempt 2 succeeded');
+                                    }
+                                } catch(e) { console.log('Autoplay attempt 2 failed:', e); }
+                            }, 500);
+                            
+                            // Attempt 3: after 1500ms (handle slow browser autoplay policy)
+                            setTimeout(() => {
+                                try {
+                                    if (youtubePlayer && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                        youtubePlayer.playVideo();
+                                        console.log('Autoplay attempt 3 succeeded');
+                                    }
+                                } catch(e) { console.log('Autoplay attempt 3 failed:', e); }
+                            }, 1500);
+                            
+                            // Attempt 4: after 3000ms (last resort)
+                            setTimeout(() => {
+                                try {
+                                    if (youtubePlayer && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                        youtubePlayer.playVideo();
+                                        console.log('Autoplay attempt 4 (last resort) succeeded');
+                                    }
+                                } catch(e) { console.log('Autoplay attempt 4 failed:', e); }
+                                // Release isSyncing flag
+                                isSyncing = false;
+                            }, 3000);
+                        }
+                        
+                        youtubeReady = true;
                     },
                     'onStateChange': onPlayerStateChange,
                     'onError': onPlayerError
@@ -3502,6 +4050,29 @@
         // Deteksi ketika user mau keluar dari page
         window.addEventListener('beforeunload', () => {
             isLeavingPage = true;
+            
+            // === AUTO HOST TRANSFER: transfer host to first guest before leaving ===
+            if (isHost && syncChannel) {
+                try {
+                    const currentState = window.currentPresenceState || {};
+                    const guests = Object.entries(currentState)
+                        .filter(([id]) => id !== currentUserId)
+                        .map(([id, presences]) => ({
+                            id,
+                            name: presences[0]?.user_name || 'Guest',
+                            joined_at: new Date(presences[0]?.joined_at || 0)
+                        }))
+                        .sort((a, b) => a.joined_at - b.joined_at);
+                    
+                    if (guests.length > 0) {
+                        // Transfer host to the guest who joined earliest
+                        window.watchParty.broadcastHostTransfer(syncChannel, guests[0].id, guests[0].name);
+                    }
+                } catch(e) {
+                    console.log('Host transfer beforeunload failed:', e);
+                }
+            }
+            
             if (subscription) {
                 window.watchParty.unsubscribeFromRoom(subscription);
             }
