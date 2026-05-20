@@ -658,6 +658,16 @@ function subscribeToSync(roomId, callbacks) {
         callbacks.onSyncResponse(payload.payload);
       }
     })
+    .on("broadcast", { event: "host_transfer" }, (payload) => {
+      if (callbacks && callbacks.onHostTransfer) {
+        callbacks.onHostTransfer(payload.payload);
+      }
+    })
+    .on("broadcast", { event: "host_reclaim" }, (payload) => {
+      if (callbacks && callbacks.onHostReclaim) {
+        callbacks.onHostReclaim(payload.payload);
+      }
+    })
     .subscribe();
 
   return channel;
@@ -781,6 +791,39 @@ async function broadcastSyncResponse(channel, state) {
       payload: {
         status: state.status,
         currentTime: state.currentTime,
+        timestamp: Date.now(),
+      },
+    });
+  }
+}
+
+/**
+ * Broadcast host transfer — host leaves, assigns new temp host
+ */
+async function broadcastHostTransfer(channel, newHostId, newHostName) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "host_transfer",
+      payload: {
+        new_host_id: newHostId,
+        new_host_name: newHostName || "Guest",
+        timestamp: Date.now(),
+      },
+    });
+  }
+}
+
+/**
+ * Broadcast host reclaim — original host rejoins, takes back control
+ */
+async function broadcastHostReclaim(channel, originalHostId) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "host_reclaim",
+      payload: {
+        original_host_id: originalHostId,
         timestamp: Date.now(),
       },
     });
@@ -1389,6 +1432,8 @@ window.watchParty = {
   broadcastKnockResponse,
   broadcastSyncRequest,
   broadcastSyncResponse,
+  broadcastHostTransfer,
+  broadcastHostReclaim,
   unsubscribeFromSync,
   checkIsHost,
   checkRoomExpiry,
