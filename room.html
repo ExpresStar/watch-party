@@ -4262,6 +4262,19 @@
             updateVoiceButtonUI();
         }
         
+        // iOS fix: Klik mana saja di page untuk unlock audio session
+        // Ini jadi safety net kalau audio masih terblokir
+        document.addEventListener('click', function iosAudioUnlock() {
+            // Hanya perlu sekali
+            document.removeEventListener('click', iosAudioUnlock);
+            try {
+                const a = new Audio();
+                a.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+                a.volume = 0.01;
+                a.play().then(() => { a.pause(); a.src = ''; }).catch(() => {});
+            } catch(e) {}
+        }, { once: true });
+        
         // Long press: toggle mute (tanpa leave voice)
         let voiceBtnPressTimer = null;
         document.addEventListener('DOMContentLoaded', () => {
@@ -4393,7 +4406,12 @@
                         }
                     },
                     onError: (data) => {
-                        showSyncIndicator('⚠️ ' + (data.message || 'Voice chat error'));
+                        const msg = data.message || 'Voice chat error';
+                        showSyncIndicator('⚠️ ' + msg);
+                        // iOS: kalau audio terblokir, tampilkan hint
+                        if (/blokir|blocked|unlock|HTTPS/i.test(msg)) {
+                            console.warn('[Voice] iOS hint:', msg);
+                        }
                     }
                 }
             }).then(() => {
