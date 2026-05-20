@@ -140,10 +140,84 @@
                             ⛶
                         </button>
                         
+                        <!-- Voice Chat Button -->
+                        <button class="voice-chat-btn" id="voiceChatBtn" onclick="toggleVoiceChat()" title="Voice Chat: Off">
+                            <span class="voice-off" id="voiceIconOff">🎤</span>
+                            <span class="voice-on" id="voiceIconOn">🎤</span>
+                            <span class="voice-muted" id="voiceIconMuted">🔇</span>
+                        </button>
+                        
                         <!-- Subtitle Toggle Button -->
                         <button class="subtitle-toggle-btn active" id="subtitleToggleBtn" onclick="toggleSubtitles()" title="Subtitle: ON">
                             <span id="subtitleIcon">CC</span>
                         </button>
+                        
+                        <style>
+                            .voice-chat-btn {
+                                position: absolute;
+                                bottom: 10px;
+                                left: 48px;
+                                z-index: 20;
+                                background: rgba(0, 0, 0, 0.7);
+                                color: #fff;
+                                border: 2px solid rgba(255, 255, 255, 0.2);
+                                border-radius: 50%;
+                                width: 38px;
+                                height: 38px;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                cursor: pointer;
+                                font-size: 1.1rem;
+                                transition: all 0.2s ease;
+                                backdrop-filter: blur(8px);
+                                -webkit-backdrop-filter: blur(8px);
+                            }
+                            .voice-chat-btn:hover {
+                                background: rgba(0, 0, 0, 0.85);
+                                border-color: rgba(255, 255, 255, 0.4);
+                                transform: scale(1.08);
+                            }
+                            /* Voice OFF (default) */
+                            .voice-chat-btn .voice-off { display: inline; }
+                            .voice-chat-btn .voice-on { display: none; }
+                            .voice-chat-btn .voice-muted { display: none; }
+                            /* Voice ON (green) */
+                            .voice-chat-btn.active {
+                                border-color: #22c55e;
+                                background: rgba(34, 197, 94, 0.25);
+                            }
+                            .voice-chat-btn.active .voice-off { display: none; }
+                            .voice-chat-btn.active .voice-on { display: inline; }
+                            /* Voice MUTED (red) */
+                            .voice-chat-btn.muted {
+                                border-color: #ef4444;
+                                background: rgba(239, 68, 68, 0.25);
+                            }
+                            .voice-chat-btn.muted .voice-off { display: none; }
+                            .voice-chat-btn.muted .voice-muted { display: inline; }
+                            
+                            /* Voice indicator in viewers panel */
+                            .viewer-voice-indicator {
+                                display: inline-flex;
+                                align-items: center;
+                                gap: 3px;
+                                margin-left: 6px;
+                                font-size: 0.7rem;
+                                opacity: 0.8;
+                            }
+                            .viewer-voice-indicator.speaking .voice-mic-icon {
+                                color: #22c55e;
+                                animation: voicePulse 0.6s ease-in-out infinite;
+                            }
+                            .viewer-voice-indicator.muted-voice .voice-mic-icon {
+                                color: #ef4444;
+                            }
+                            @keyframes voicePulse {
+                                0%, 100% { transform: scale(1); }
+                                50% { transform: scale(1.3); }
+                            }
+                        </style>
                     </div>
                 </div>
                 
@@ -464,6 +538,10 @@
     <script src="supabase.js"></script>
     <!-- YouTube IFrame API -->
     <script src="https://www.youtube.com/iframe_api"></script>
+    <!-- PeerJS — Voice Chat P2P -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <!-- Voice Chat Module -->
+    <script src="voice.js"></script>
     <script>
         // ===========================================
         // ROOM PAGE - VIDEO PLAYER & REALTIME SYNC
@@ -1444,6 +1522,9 @@
                 loadQueue();
                 setupTypingIndicator();
                 
+                // Init voice chat (PeerJS peer) — setelah semua subscription siap
+                setTimeout(() => { initVoiceChat(); }, 1000);
+                
                 // Guest: sync cepat saat join
                 if (!isHost) {
                     // 1. Backup re-sync dari DB setelah 2 detik
@@ -1525,6 +1606,11 @@
                                 if (!greetedUsers.has(uid)) {
                                     greetedUsers.add(uid);
                                     showSyncIndicator(`👋 ${name} bergabung!`);
+                                }
+                                
+                                // VOICE: kalau peer baru join dan sedang voice, connect ke mereka
+                                if (VoiceChat.getIsJoined() && presence.voice_on && presence.voice_peer_id) {
+                                    VoiceChat.connectToPeer(uid, presence.voice_peer_id);
                                 }
                             }
                         });
@@ -1679,8 +1765,19 @@
                     
                     const info = document.createElement('div');
                     info.className = 'viewer-panel-info';
+                    
+                    // Voice indicator
+                    let voiceIndicatorHtml = '';
+                    if (user.voice_on) {
+                        const isSpeaking = user.user_id !== currentUserId && VoiceChat.isSpeaking(user.user_id);
+                        const isMuted = user.voice_muted;
+                        const voiceClass = isSpeaking ? 'speaking' : (isMuted ? 'muted-voice' : '');
+                        const micIcon = isMuted ? '🔇' : '🎤';
+                        voiceIndicatorHtml = `<span class="viewer-voice-indicator ${voiceClass}" data-voice-uid="${user.user_id}"><span class="voice-mic-icon">${micIcon}</span></span>`;
+                    }
+                    
                     info.innerHTML = `
-                        <span class="viewer-panel-name">${escapeHtml(displayName)}</span>
+                        <span class="viewer-panel-name">${escapeHtml(displayName)}${voiceIndicatorHtml}</span>
                         <span class="viewer-panel-role">${user.is_host ? '👑 Host' : (user.user_id === currentUserId ? '⭐ Kamu' : '👤 Guest')}</span>
                     `;
                     
@@ -1909,6 +2006,8 @@
             }
             // 2. Hapus dari greetedUsers agar kalau user kembali, muncul notif lagi
             greetedUsers.delete(targetUserId);
+            // 2.5 Disconnect voice if connected
+            try { VoiceChat.removePeer(targetUserId); } catch(e) {}
             // 3. Batalkan pending leave/host-transfer timers kalau ada
             if (leaveTimers[targetUserId]) {
                 clearTimeout(leaveTimers[targetUserId]);
@@ -4070,6 +4169,9 @@
         window.addEventListener('beforeunload', () => {
             isLeavingPage = true;
             
+            // === VOICE CHAT: cleanup ===
+            try { VoiceChat.destroy(); } catch(e) {}
+            
             // === AUTO HOST TRANSFER: transfer host to first guest before leaving ===
             if (isHost && syncChannel) {
                 try {
@@ -4132,6 +4234,175 @@
                 }
             }, 1000);
         });
+        
+        // ===========================================
+        // VOICE CHAT — PeerJS Integration
+        // ===========================================
+        
+        let voiceInitialized = false;
+        
+        // Toggle voice: Off → On → Muted → On → ... Muted → Off (long press)
+        async function toggleVoiceChat() {
+            if (!VoiceChat.getIsJoined()) {
+                // OFF → ON: join voice
+                const success = await VoiceChat.joinVoice();
+                if (success) {
+                    updateVoicePresence();
+                    connectToAllVoicePeers();
+                    showSyncIndicator('🎤 Voice chat aktif');
+                } else {
+                    showSyncIndicator('⚠️ Gagal mengakses mikrofon');
+                }
+            } else {
+                // ON/MUTED → OFF: leave voice
+                VoiceChat.leaveVoice();
+                updateVoicePresence();
+                showSyncIndicator('🔇 Voice chat nonaktif');
+            }
+            updateVoiceButtonUI();
+        }
+        
+        // Long press: toggle mute (tanpa leave voice)
+        let voiceBtnPressTimer = null;
+        document.addEventListener('DOMContentLoaded', () => {
+            const btn = document.getElementById('voiceChatBtn');
+            if (!btn) return;
+            
+            btn.addEventListener('mousedown', (e) => {
+                voiceBtnPressTimer = setTimeout(() => {
+                    voiceBtnPressTimer = 'longpress';
+                    if (VoiceChat.getIsJoined()) {
+                        VoiceChat.toggleMute();
+                        updateVoicePresence();
+                        updateVoiceButtonUI();
+                        showSyncIndicator(VoiceChat.getIsMuted() ? '🔇 Mikrofon dimatikan' : '🎤 Mikrofon aktif');
+                    }
+                }, 500);
+            });
+            
+            btn.addEventListener('mouseup', () => {
+                if (voiceBtnPressTimer === 'longpress') {
+                    // Long press detected — prevent the onclick toggle
+                    voiceBtnPressTimer = null;
+                    event.preventDefault();
+                    event.stopPropagation();
+                } else {
+                    clearTimeout(voiceBtnPressTimer);
+                    voiceBtnPressTimer = null;
+                }
+            });
+            
+            btn.addEventListener('mouseleave', () => {
+                clearTimeout(voiceBtnPressTimer);
+                voiceBtnPressTimer = null;
+            });
+            
+            // Touch support
+            btn.addEventListener('touchstart', (e) => {
+                voiceBtnPressTimer = setTimeout(() => {
+                    voiceBtnPressTimer = 'longpress';
+                    if (VoiceChat.getIsJoined()) {
+                        VoiceChat.toggleMute();
+                        updateVoicePresence();
+                        updateVoiceButtonUI();
+                        showSyncIndicator(VoiceChat.getIsMuted() ? '🔇 Mikrofon dimatikan' : '🎤 Mikrofon aktif');
+                    }
+                }, 500);
+            }, { passive: true });
+            
+            btn.addEventListener('touchend', (e) => {
+                if (voiceBtnPressTimer === 'longpress') {
+                    e.preventDefault();
+                } else {
+                    clearTimeout(voiceBtnPressTimer);
+                }
+                voiceBtnPressTimer = null;
+            });
+        });
+        
+        function updateVoiceButtonUI() {
+            const btn = document.getElementById('voiceChatBtn');
+            if (!btn) return;
+            
+            btn.classList.remove('active', 'muted');
+            
+            if (!VoiceChat.getIsJoined()) {
+                btn.title = 'Voice Chat: Off';
+            } else if (VoiceChat.getIsMuted()) {
+                btn.classList.add('muted');
+                btn.title = 'Voice Chat: Muted (tahan untuk mute, klik untuk matikan)';
+            } else {
+                btn.classList.add('active');
+                btn.title = 'Voice Chat: On (tahan untuk mute, klik untuk matikan)';
+            }
+        }
+        
+        function updateVoicePresence() {
+            if (!presenceChannel) return;
+            window.watchParty.updatePresence(presenceChannel, {
+                user_id: currentUserId,
+                user_name: currentUserName || 'Guest',
+                is_host: isHost,
+                joined_at: new Date().toISOString(),
+                online: true,
+                voice_on: VoiceChat.getIsJoined(),
+                voice_peer_id: VoiceChat.getPeerId() || '',
+                voice_muted: VoiceChat.getIsMuted()
+            });
+        }
+        
+        function connectToAllVoicePeers() {
+            const state = window.currentPresenceState || {};
+            Object.entries(state).forEach(([uid, presences]) => {
+                if (uid === currentUserId) return;
+                const p = presences[0];
+                if (p && p.voice_on && p.voice_peer_id && p.voice_peer_id !== VoiceChat.getPeerId()) {
+                    VoiceChat.connectToPeer(uid, p.voice_peer_id);
+                }
+            });
+        }
+        
+        function initVoiceChat() {
+            if (voiceInitialized) return;
+            voiceInitialized = true;
+            
+            VoiceChat.init({
+                roomId: roomId,
+                userId: currentUserId,
+                userName: currentUserName,
+                callbacks: {
+                    onStateChange: (data) => {
+                        if (data.userId) {
+                            // Peer mute state changed — update viewers display
+                            updateViewersDisplay(window.currentPresenceState || {});
+                        } else {
+                            // My state changed — update button
+                            updateVoiceButtonUI();
+                        }
+                    },
+                    onPeerJoined: (uid) => {
+                        updateViewersDisplay(window.currentPresenceState || {});
+                    },
+                    onPeerLeft: (uid) => {
+                        updateViewersDisplay(window.currentPresenceState || {});
+                    },
+                    onSpeakingChange: (uid, isSpeaking) => {
+                        const el = document.querySelector(`[data-voice-uid="${uid}"]`);
+                        if (el) {
+                            el.classList.toggle('speaking', isSpeaking);
+                        }
+                    },
+                    onError: (data) => {
+                        showSyncIndicator('⚠️ ' + (data.message || 'Voice chat error'));
+                    }
+                }
+            }).then(() => {
+                // Update presence with our peer ID
+                updateVoicePresence();
+            }).catch(err => {
+                console.warn('[Voice] Init failed:', err);
+            });
+        }
         
         // ===========================================
         // START APP
