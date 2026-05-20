@@ -1902,6 +1902,25 @@
             // Broadcast kick via sync channel
             window.watchParty.broadcastKick(syncChannel, targetUserId, currentUserName || 'Host');
             
+            // HAPUS LANGSUNG dari tampilan peserta — jangan tunggu onLeave
+            // 1. Hapus dari presence state lokal
+            if (window.currentPresenceState && window.currentPresenceState[targetUserId]) {
+                delete window.currentPresenceState[targetUserId];
+            }
+            // 2. Hapus dari greetedUsers agar kalau user kembali, muncul notif lagi
+            greetedUsers.delete(targetUserId);
+            // 3. Batalkan pending leave/host-transfer timers kalau ada
+            if (leaveTimers[targetUserId]) {
+                clearTimeout(leaveTimers[targetUserId]);
+                delete leaveTimers[targetUserId];
+            }
+            if (hostTransferTimers[targetUserId]) {
+                clearTimeout(hostTransferTimers[targetUserId]);
+                delete hostTransferTimers[targetUserId];
+            }
+            // 4. Re-render viewers list (langsung hilang dari daftar)
+            updateViewersDisplay(window.currentPresenceState || {});
+            
             // Show notification
             showSyncIndicator(`🚫 ${targetUserName} telah dikeluarkan dari room`);
             
