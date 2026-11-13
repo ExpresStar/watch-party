@@ -618,7 +618,7 @@ const VoiceChat = (() => {
 
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
-      analyser.fftSize = 512;
+      analyser.fftSize = isIOS ? 256 : 512;
       analyser.smoothingTimeConstant = 0.8;
       src.connect(analyser);
       // JANGAN connect analyser ke destination - ini cuma untuk monitoring,
@@ -631,6 +631,7 @@ const VoiceChat = (() => {
           delete speakIntervals[uid];
           return;
         }
+        if (document.hidden || ctx.state !== "running") return;
         analyser.getByteFrequencyData(data);
         let sum = 0;
         for (let i = 0; i < data.length; i++) sum += data[i];
@@ -641,7 +642,7 @@ const VoiceChat = (() => {
           speakingState[uid] = isSpeaking;
           cb.onSpeakingChange(uid, isSpeaking);
         }
-      }, 200);
+      }, isIOS ? 350 : 200);
     } catch (e) {
       console.warn("[Voice] Speaking detection failed for", uid, e);
     }

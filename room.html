@@ -223,8 +223,9 @@
                     <video
                         id="videoPlayer"
                         controls
-                        preload="auto"
+                        preload="metadata"
                         playsinline
+                        webkit-playsinline
                         crossorigin="anonymous"
                         style="display: none;"
                     >
@@ -410,8 +411,10 @@
     <script src="voice.js"></script>
     <script>
         const syncLib = window.watchPartySync;
-        const IS_MOBILE_BROWSER = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '')
+        const IS_IOS_DEVICE = /iPad|iPhone|iPod/i.test(navigator.userAgent || '')
             || (/MacIntel/.test(navigator.platform || '') && navigator.maxTouchPoints > 1);
+        const IS_MOBILE_BROWSER = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '')
+            || IS_IOS_DEVICE;
 
         // ===========================================
         // GLOBAL STATE
@@ -449,7 +452,11 @@
         const HOST_TICK_INTERVAL_MS = 1500;
         const DB_TIME_SAVE_INTERVAL_MS = 5000;
         const PING_REFRESH_INTERVAL_MS = 20000;
-        const PLAYER_POLL_MS = 400;
+        const PLAYER_POLL_MS = IS_IOS_DEVICE ? 750 : 400;
+        const SYNC_SEEK_COOLDOWN_MS = IS_IOS_DEVICE ? 4500 : 1800;
+        const YT_TICK_SEEK_THRESHOLD_SEC = IS_IOS_DEVICE ? 1.10 : syncLib.SEEK_THRESHOLD_SEC;
+        const HTML5_TICK_SEEK_THRESHOLD_SEC = IS_IOS_DEVICE ? 1.10 : 0.70;
+        const HTML5_RATE_DEADBAND_SEC = IS_IOS_DEVICE ? 0.22 : 0.08;
 
         let initialGuestSyncDone = false;
         let clockOffsetMs = 0; // estimatedHostNow = Date.now() + clockOffsetMs
@@ -457,6 +464,9 @@
         let clockSamples = [];
         let hostTickSeq = 0;
         let lastDbTimeSaveAt = 0;
+        let lastSyncSeekAt = 0;
+        let lastHtml5RateAt = 0;
+        let lastRenderedTimeText = '';
         let lastHostSyncSnapshot = null; // { status, currentTime, sentAt }
         let lastHostYtPos = 0;
         let lastHostYtSampleAt = 0;
@@ -541,6 +551,13 @@
                     <button type="button" class="btn btn-primary" onclick="goHome()">Kembali ke Beranda</button>
                 </div>
             `;
+        }
+
+        function renderTimeDisplay(currentSec, durationSec) {
+            const nextText = `${formatTime(currentSec)} / ${formatTime(durationSec)}`;
+            if (nextText === lastRenderedTimeText) return;
+            lastRenderedTimeText = nextText;
+            currentTimeDisplay.textContent = nextText;
         }
 
         function formatTime(seconds) {
@@ -1036,13 +1053,16 @@
                         const nowPos = youtubePlayer.getCurrentTime ? (youtubePlayer.getCurrentTime() || 0) : 0;
                         if (Math.abs(nowPos - pendingTarget) > syncLib.SEEK_THRESHOLD_SEC) {
                             isSyncing = true;
+                            lastSyncSeekAt = Date.now();
                             postBufferAlignArmed = true;
                             youtubePlayer.seekTo(pendingTarget, true);
                             setTimeout(() => { isSyncing = false; }, 220);
                         }
                     } else if (prev === YT.PlayerState.BUFFERING || postBufferAlignArmed) {
                         postBufferAlignArmed = false;
-                        schedulePostBufferRealign();
+                        if (Date.now() - lastSyncSeekAt >= SYNC_SEEK_COOLDOWN_MS) {
+                            schedulePostBufferRealign();
+                        }
                     }
                     try {
                         if (youtubePlayer.isMuted && !youtubePlayer.isMuted()) {
@@ -1101,7 +1121,7 @@
             if (!youtubePlayer || typeof youtubePlayer.getCurrentTime !== 'function') return;
             const current = youtubePlayer.getCurrentTime() || 0;
             const duration = youtubePlayer.getDuration ? (youtubePlayer.getDuration() || 0) : 0;
-            currentTimeDisplay.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
+            renderTimeDisplay(current, duration);
 
             if (!isHost || isSyncing) return;
 
@@ -1185,8 +1205,10 @@
 
         function applySyncedPlayback({ status, currentTime, sentAt, forceSeek = false, source = 'sync' }) {
             if (isHost || !status || playerType === 'gdrive') return;
+            if (source === 'tick' && document.hidden) return;
 
-            lastHostSyncSnapshot = { status, currentTime, sentAt: sentAt || Date.now() };
+            const nowMs = Date.now();
+            lastHostSyncSnapshot = { status, currentTime, sentAt: sentAt || nowMs };
             if (roomData) {
                 roomData.status = status;
                 roomData.current_time_sec = currentTime;
@@ -1195,8 +1217,8 @@
             const targetTime = syncLib.computeTargetPlaybackTime({
                 status,
                 currentTime,
-                sentAt: sentAt || Date.now(),
-                nowMs: Date.now(),
+                sentAt: sentAt || nowMs,
+                nowMs,
                 clockOffsetMs,
             });
 
@@ -1205,6 +1227,7 @@
             }
 
             isSyncing = true;
+            const canSeekNow = forceSeek || (nowMs - lastSyncSeekAt >= SYNC_SEEK_COOLDOWN_MS);
 
             if (playerType === 'youtube' && youtubePlayer && typeof youtubePlayer.getCurrentTime === 'function') {
                 const ytState = youtubePlayer.getPlayerState ? youtubePlayer.getPlayerState() : -1;
@@ -1215,11 +1238,13 @@
                     localTime,
                     playerType: 'youtube',
                     forceSeek,
+                    youtubeSeekThresholdSec: YT_TICK_SEEK_THRESHOLD_SEC,
                 });
 
                 if (decision.action === 'seek_pause' || decision.action === 'pause') {
                     ytPendingSeekAfterStart = null;
                     if (decision.action === 'seek_pause' && ytState !== -1) {
+                        lastSyncSeekAt = nowMs;
                         youtubePlayer.seekTo(decision.targetTime, true);
                     }
                     try { youtubePlayer.pauseVideo(); } catch (e) {}
@@ -1232,7 +1257,7 @@
                     if (isBuffering && !forceSeek) {
                         updateSyncHealthUI('adjusting', 'Memuat video...');
                     } else if (notStartedYet) {
-                        ytPendingSeekAfterStart = decision.drift > syncLib.SEEK_THRESHOLD_SEC ? decision.targetTime : null;
+                        ytPendingSeekAfterStart = decision.drift > YT_TICK_SEEK_THRESHOLD_SEC ? decision.targetTime : null;
                         if (IS_MOBILE_BROWSER || !guestHasInteracted) {
                             try {
                                 youtubePlayer.mute();
@@ -1243,7 +1268,8 @@
                         ensureYouTubeMutedAutoplayFallback();
                         updateStatusDisplay('play');
                     } else {
-                        if (decision.action === 'seek_play') {
+                        if (decision.action === 'seek_play' && canSeekNow) {
+                            lastSyncSeekAt = nowMs;
                             postBufferAlignArmed = true;
                             youtubePlayer.seekTo(decision.targetTime, true);
                             updateSyncHealthUI('adjusting', 'Menyelaraskan...');
@@ -1269,12 +1295,15 @@
                     localTime,
                     playerType: 'html5',
                     forceSeek,
+                    html5SeekThresholdSec: HTML5_TICK_SEEK_THRESHOLD_SEC,
+                    html5RateDeadbandSec: HTML5_RATE_DEADBAND_SEC,
                 });
 
                 if (decision.action === 'seek_pause' || decision.action === 'pause') {
-                    videoPlayer.playbackRate = 1.0;
+                    if (videoPlayer.playbackRate !== 1.0) videoPlayer.playbackRate = 1.0;
                     videoPlayer.pause();
                     if (decision.action === 'seek_pause') {
+                        lastSyncSeekAt = nowMs;
                         videoPlayer.currentTime = decision.targetTime;
                     }
                     updateStatusDisplay('pause');
@@ -1284,16 +1313,20 @@
                         videoPlayer.muted = true;
                         showAudioUnlockBar(true);
                     }
-                    if (decision.action === 'seek_play') {
+                    if (decision.action === 'seek_play' && canSeekNow) {
+                        lastSyncSeekAt = nowMs;
                         postBufferAlignArmed = true;
-                        videoPlayer.playbackRate = 1.0;
+                        if (videoPlayer.playbackRate !== 1.0) videoPlayer.playbackRate = 1.0;
                         videoPlayer.currentTime = decision.targetTime;
                         updateSyncHealthUI('adjusting', 'Menyelaraskan...');
                     } else if (decision.action === 'rate_adjust') {
-                        videoPlayer.playbackRate = decision.rate;
+                        if (Math.abs(videoPlayer.playbackRate - decision.rate) >= 0.02 && nowMs - lastHtml5RateAt >= 1200) {
+                            lastHtml5RateAt = nowMs;
+                            videoPlayer.playbackRate = decision.rate;
+                        }
                         updateSyncHealthUI('adjusting', `Menyesuaikan (${decision.rate}x)`);
                     } else {
-                        videoPlayer.playbackRate = 1.0;
+                        if (videoPlayer.playbackRate !== 1.0) videoPlayer.playbackRate = 1.0;
                         updateSyncHealthUI('synced', formatSyncDetail(decision.drift));
                     }
                     if (videoPlayer.paused && videoPlayer.readyState >= 2) {
@@ -2318,6 +2351,9 @@
             const isFs = document.fullscreenElement || document.webkitFullscreenElement || isIOSFakeFullscreen;
             const container = document.getElementById(isFs ? 'floatingReactionsFullscreen' : 'floatingReactions');
             if (!container) return;
+            while (container.children.length >= 8) {
+                container.firstElementChild.remove();
+            }
             const el = document.createElement('div');
             el.className = 'floating-emoji';
             el.textContent = emoji;
@@ -2422,7 +2458,7 @@
             videoPlayer.addEventListener('timeupdate', () => {
                 const cur = videoPlayer.currentTime || 0;
                 const dur = videoPlayer.duration || 0;
-                currentTimeDisplay.textContent = `${formatTime(cur)} / ${formatTime(dur)}`;
+                renderTimeDisplay(cur, dur);
 
                 if (!isHost || isSyncing || videoPlayer.paused) return;
                 const now = Date.now();
@@ -3168,6 +3204,13 @@
             if (bookmarkChannel) window.watchParty.unsubscribeFromBookmarks(bookmarkChannel);
             if (queueChannel) window.watchParty.unsubscribeFromQueue(queueChannel);
             if (subscription) window.watchParty.unsubscribeFromRoom(subscription);
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && !isHost && syncChannel && playerType !== 'gdrive') {
+                postBufferRetries = 0;
+                window.watchParty.broadcastSyncRequest(syncChannel);
+            }
         });
 
         document.addEventListener('DOMContentLoaded', () => {

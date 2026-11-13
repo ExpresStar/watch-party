@@ -59,6 +59,8 @@ body::before {
   inset: 0;
   z-index: -1;
   pointer-events: none;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
   background-color: var(--bg-canvas);
   background-image:
     linear-gradient(180deg, rgba(10, 9, 9, 0.72) 0%, rgba(10, 9, 9, 0.82) 100%),
@@ -857,6 +859,8 @@ button {
 
 .viewers-panel-list {
   overflow-y: auto;
+  contain: layout style;
+  -webkit-overflow-scrolling: touch;
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -1221,6 +1225,7 @@ button {
 
 .floating-emoji {
   font-size: 1.75rem;
+  will-change: transform, opacity;
   animation: floatUp 1.8s ease-out forwards;
 }
 
@@ -1303,6 +1308,8 @@ button {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  contain: layout style;
+  -webkit-overflow-scrolling: touch;
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -1645,5 +1652,11 @@ button {
   .modal-close {
     min-width: 44px;
     min-height: 44px;
+  }
+
+  .viewers-panel,
+  .modal,
+  .sync-indicator {
+    box-shadow: none;
   }
 }

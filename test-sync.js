@@ -78,6 +78,7 @@ assert.equal(
   sync.decideSyncAction({ status: "play", targetTime: 100.04, localTime: 100.0, playerType: "html5" }).action,
   "aligned",
 );
+assert.equal(sync.SEEK_THRESHOLD_SEC, 0.45);
 const nudge = sync.decideSyncAction({ status: "play", targetTime: 100.35, localTime: 100.0, playerType: "html5" });
 assert.equal(nudge.action, "rate_adjust");
 assert.ok(nudge.rate > 1.0 && nudge.rate <= 1.08);
@@ -86,6 +87,38 @@ assert.equal(bigJump.action, "seek_play");
 assert.equal(
   sync.decideSyncAction({ status: "pause", targetTime: 50.5, localTime: 50.0, playerType: "html5" }).action,
   "seek_pause",
+);
+// iOS thresholds avoid micro-seek/rate churn under normal jitter unless forceSeek
+assert.equal(
+  sync.decideSyncAction({
+    status: "play",
+    targetTime: 100.85,
+    localTime: 100.0,
+    playerType: "youtube",
+    youtubeSeekThresholdSec: 1.1,
+  }).action,
+  "aligned",
+);
+assert.equal(
+  sync.decideSyncAction({
+    status: "play",
+    targetTime: 100.15,
+    localTime: 100.0,
+    playerType: "html5",
+    html5RateDeadbandSec: 0.22,
+  }).action,
+  "aligned",
+);
+assert.equal(
+  sync.decideSyncAction({
+    status: "play",
+    targetTime: 100.85,
+    localTime: 100.0,
+    playerType: "youtube",
+    forceSeek: true,
+    youtubeSeekThresholdSec: 1.1,
+  }).action,
+  "seek_play",
 );
 
 // 8. Static anti-slop guard: zero em dashes across deliverables

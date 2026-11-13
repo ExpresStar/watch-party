@@ -131,6 +131,8 @@
     return baseTime + elapsedSec;
   }
 
+  const SEEK_THRESHOLD_SEC = 0.45;
+
   /**
    * Decide exact action for guest player to stay synchronized without unnecessary seeks.
    */
@@ -140,6 +142,9 @@
     localTime,
     playerType = "html5",
     forceSeek = false,
+    youtubeSeekThresholdSec = SEEK_THRESHOLD_SEC,
+    html5SeekThresholdSec = 0.70,
+    html5RateDeadbandSec = 0.08,
   }) {
     const safeTarget = Number.isFinite(targetTime) && targetTime > 0 ? targetTime : 0;
     const safeLocal = Number.isFinite(localTime) && localTime > 0 ? localTime : 0;
@@ -152,11 +157,12 @@
       return { action: "pause", targetTime: safeTarget, drift, rate: 1.0 };
     }
 
-    if (forceSeek || Math.abs(drift) > 0.70) {
+    const seekThreshold = playerType === "youtube" ? youtubeSeekThresholdSec : html5SeekThresholdSec;
+    if (forceSeek || Math.abs(drift) > seekThreshold) {
       return { action: "seek_play", targetTime: safeTarget, drift, rate: 1.0 };
     }
 
-    if (playerType === "html5" && Math.abs(drift) > 0.08) {
+    if (playerType === "html5" && Math.abs(drift) > html5RateDeadbandSec) {
       // Gently speed up or slow down playbackRate instead of stutter-seeking.
       const nudge = 1 + drift * 0.14;
       const clamped = Math.max(0.92, Math.min(1.08, nudge));
@@ -164,14 +170,11 @@
       return { action: "rate_adjust", targetTime: safeTarget, drift, rate };
     }
 
-    if (playerType === "youtube" && Math.abs(drift) > 0.45) {
-      return { action: "seek_play", targetTime: safeTarget, drift, rate: 1.0 };
-    }
-
     return { action: "aligned", targetTime: safeTarget, drift, rate: 1.0 };
   }
 
   return {
+    SEEK_THRESHOLD_SEC,
     escapeHtml,
     isYouTubeUrl,
     getYouTubeVideoId,
