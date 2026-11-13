@@ -239,7 +239,9 @@
                         Browser kamu tidak mendukung pemutar video HTML5.
                     </video>
 
-                    <div id="youtubePlayer" style="display: none;"></div>
+                    <div id="youtubePlayerStage" class="yt-player-stage" style="display: none;">
+                        <div id="youtubePlayer"></div>
+                    </div>
                     <div id="gdrivePlayer" style="display: none;"></div>
                     <div class="player-overlay" id="ytFallback"></div>
 
@@ -403,12 +405,21 @@
     <div class="floating-reactions" id="floatingReactions"></div>
     <div class="sync-indicator" id="syncIndicator" role="status" aria-live="polite"></div>
 
+    <script>
+        window.__ytApiLoaded = false;
+        window.onYouTubeIframeAPIReady = function () {
+            window.__ytApiLoaded = true;
+            if (typeof handleYouTubeApiReady === 'function') handleYouTubeApiReady();
+        };
+    </script>
     <script src="https://www.youtube.com/iframe_api"></script>
     <script src="sync-engine.js"></script>
     <script src="supabase.js"></script>
     <script src="voice.js"></script>
     <script>
         const syncLib = window.watchPartySync;
+        const IS_MOBILE_BROWSER = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '')
+            || (/MacIntel/.test(navigator.platform || '') && navigator.maxTouchPoints > 1);
 
         // ===========================================
         // GLOBAL STATE
@@ -427,8 +438,10 @@
         let currentUserName = '';
         let playerType = 'html5'; // 'html5' | 'youtube' | 'gdrive'
         let youtubePlayer = null;
-        let youtubeApiReady = false;
+        let youtubeApiReady = Boolean(window.__ytApiLoaded || (window.YT && window.YT.Player));
         let youtubeTimeInterval = null;
+        let ytAutoplayFallbackTimer = null;
+        let ytPendingSeekAfterStart = null;
         let activeBlobUrl = null;
         let html5ListenersBound = false;
 
@@ -489,7 +502,7 @@
 
         // DOM References
         const videoPlayer = document.getElementById('videoPlayer');
-        const youtubePlayerDiv = document.getElementById('youtubePlayer');
+        const youtubePlayerStage = document.getElementById('youtubePlayerStage');
         const gdrivePlayerDiv = document.getElementById('gdrivePlayer');
         const roomIdDisplay = document.getElementById('roomIdDisplay');
         const statusDot = document.getElementById('statusDot');
@@ -600,18 +613,47 @@
         // ===========================================
         // PLAYER LIFECYCLE & LOCAL FILE / GDRIVE NOTICE
         // ===========================================
+        function showAudioUnlockBar(show, customText) {
+            const bar = document.getElementById('sourceNoticeBar');
+            const textEl = document.getElementById('sourceNoticeText');
+            if (!bar || !textEl || !enableAudioBtn) return;
+            if (show) {
+                enableAudioBtn.style.display = 'inline-flex';
+                if (!textEl.textContent || textEl.dataset.audioNotice === '1') {
+                    textEl.textContent = customText || 'Suara dibisukan agar video bisa auto-play. Ketuk Aktifkan Suara.';
+                    textEl.dataset.audioNotice = '1';
+                }
+                bar.classList.add('show');
+                return;
+            }
+            enableAudioBtn.style.display = 'none';
+            if (textEl.dataset.audioNotice === '1') {
+                delete textEl.dataset.audioNotice;
+                textEl.textContent = '';
+                const currentUrl = (roomData && roomData.video_url) || '';
+                if (!syncLib.isLocalVideoUrl(currentUrl) && !syncLib.isGoogleDriveUrl(currentUrl)) {
+                    bar.classList.remove('show');
+                }
+            }
+        }
+
         function resetAllPlayers() {
             if (youtubeTimeInterval) {
                 clearInterval(youtubeTimeInterval);
                 youtubeTimeInterval = null;
             }
+            if (ytAutoplayFallbackTimer) {
+                clearTimeout(ytAutoplayFallbackTimer);
+                ytAutoplayFallbackTimer = null;
+            }
+            ytPendingSeekAfterStart = null;
             if (youtubePlayer) {
                 try { youtubePlayer.stopVideo(); } catch (e) {}
                 try { youtubePlayer.destroy(); } catch (e) {}
                 youtubePlayer = null;
             }
-            youtubePlayerDiv.innerHTML = '';
-            youtubePlayerDiv.style.display = 'none';
+            youtubePlayerStage.innerHTML = '<div id="youtubePlayer"></div>';
+            youtubePlayerStage.style.display = 'none';
 
             videoPlayer.pause();
             videoPlayer.playbackRate = 1.0;
@@ -634,7 +676,7 @@
             }
             hidePlayerLoading();
             updateSourceNoticeBar(null);
-            enableAudioBtn.style.display = 'none';
+            showAudioUnlockBar(false);
         }
 
         function updateSourceNoticeBar(videoUrl) {
@@ -644,6 +686,8 @@
             if (!bar || !textEl || !pickerLabel) return;
 
             if (!videoUrl) {
+                delete textEl.dataset.audioNotice;
+                textEl.textContent = '';
                 bar.classList.remove('show');
                 pickerLabel.style.display = 'none';
                 return;
@@ -651,6 +695,7 @@
 
             if (syncLib.isLocalVideoUrl(videoUrl)) {
                 const fileName = syncLib.getLocalVideoName(videoUrl);
+                delete textEl.dataset.audioNotice;
                 textEl.textContent = isHost
                     ? `Mode file lokal: pilih "${fileName}" dari perangkatmu untuk mulai memutar.`
                     : `Host memutar file lokal "${fileName}". Pilih file video yang sama di perangkatmu untuk sinkronisasi otomatis.`;
@@ -660,13 +705,17 @@
             }
 
             if (syncLib.isGoogleDriveUrl(videoUrl)) {
+                delete textEl.dataset.audioNotice;
                 textEl.textContent = 'Google Drive membatasi kontrol pemutar lintas domain. Sinkronisasi otomatis play, pause, dan waktu tidak aktif pada sumber ini.';
                 pickerLabel.style.display = 'none';
                 bar.classList.add('show');
                 return;
             }
 
-            bar.classList.remove('show');
+            if (textEl.dataset.audioNotice !== '1') {
+                textEl.textContent = '';
+                bar.classList.remove('show');
+            }
             pickerLabel.style.display = 'none';
         }
 
@@ -750,7 +799,7 @@
             titleEl.textContent = window.watchParty.extractVideoTitle(videoUrl) || 'Video Stream';
         }
 
-        function onYouTubeIframeAPIReady() {
+        function handleYouTubeApiReady() {
             youtubeApiReady = true;
         }
 
@@ -769,28 +818,48 @@
             updateSyncHealthUI('default', 'Mode Mandiri (Drive)');
         }
 
+        function ensureYouTubeMutedAutoplayFallback() {
+            if (ytAutoplayFallbackTimer) clearTimeout(ytAutoplayFallbackTimer);
+            ytAutoplayFallbackTimer = setTimeout(() => {
+                if (!youtubePlayer || playerType !== 'youtube' || isLeavingPage || isHost) return;
+                if (!roomData || roomData.status !== 'play') return;
+                const state = youtubePlayer.getPlayerState ? youtubePlayer.getPlayerState() : -1;
+                if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
+                    try {
+                        youtubePlayer.mute();
+                        youtubePlayer.playVideo();
+                        showAudioUnlockBar(true);
+                    } catch (e) {}
+                }
+            }, 750);
+        }
+
         function createYouTubePlayer(videoId, autoPlay = false, startSeconds = 0) {
             resetAllPlayers();
             playerType = 'youtube';
             lastVideoId = videoId;
-            youtubePlayerDiv.style.display = 'block';
+            youtubePlayerStage.style.display = 'block';
             showPlayerLoading(videoId, false);
 
+            const shouldMuteForAutoplay = !isHost && autoPlay && (IS_MOBILE_BROWSER || !guestHasInteracted);
             const pv = {
                 playsinline: 1,
                 controls: 1,
                 rel: 0,
                 modestbranding: 1,
+                enablejsapi: 1,
                 origin: window.location.origin,
-                widget_referrer: window.location.href,
                 cc_load_policy: 1,
                 cc_lang_pref: 'id',
             };
             if (startSeconds > 1) {
                 pv.start = Math.floor(startSeconds);
             }
-            if (!isHost && autoPlay) {
+            if (autoPlay) {
                 pv.autoplay = 1;
+            }
+            if (shouldMuteForAutoplay) {
+                pv.mute = 1;
             }
 
             youtubePlayer = new YT.Player('youtubePlayer', {
@@ -805,15 +874,19 @@
                 },
             });
 
-            const ytIframe = youtubePlayerDiv.querySelector('iframe');
+            const ytIframe = youtubePlayerStage.querySelector('iframe');
             if (ytIframe) {
                 ytIframe.setAttribute('allow', 'autoplay; encrypted-media; fullscreen; picture-in-picture');
+                ytIframe.setAttribute('playsinline', '1');
+            }
+            if (shouldMuteForAutoplay) {
+                showAudioUnlockBar(true);
             }
             updateSubtitleBtn();
             updateRoleUI();
         }
 
-        function showPlayerLoading(videoId, showStartPrompt = false) {
+        function showPlayerLoading(videoId) {
             const overlay = document.getElementById('playerLoadingOverlay');
             if (!overlay) return;
             if (videoId) {
@@ -821,13 +894,7 @@
             } else {
                 overlay.style.backgroundImage = '';
             }
-            overlay.innerHTML = showStartPrompt
-                ? `<div class="player-overlay-scrim">
-                        <strong style="font-size: 1.02rem;">Host sedang memutar video</strong>
-                        <span style="font-size: 0.85rem; color: #cfc7bc;">Klik untuk mulai memutar dengan suara tersinkron.</span>
-                        <button type="button" class="btn btn-primary" id="startWatchingBtn">Mulai Nonton</button>
-                   </div>`
-                : `<div class="player-overlay-scrim">
+            overlay.innerHTML = `<div class="player-overlay-scrim">
                         <div class="spinner" style="width: 26px; height: 26px;"></div>
                         <span style="font-size: 0.88rem;">Memuat pemutar video...</span>
                    </div>`;
@@ -841,18 +908,6 @@
                 overlay.style.backgroundImage = '';
                 overlay.innerHTML = '';
             }
-        }
-
-        function showStartWatchingOverlay(videoId) {
-            showPlayerLoading(videoId, true);
-            const btn = document.getElementById('startWatchingBtn');
-            if (!btn) return;
-            btn.addEventListener('click', () => {
-                guestHasInteracted = true;
-                const shouldPlay = roomData && roomData.status === 'play';
-                const startPos = roomData ? (roomData.current_time_sec || 0) : 0;
-                createYouTubePlayer(videoId, shouldPlay, startPos);
-            });
         }
 
         function onPlayerError(event) {
@@ -913,13 +968,13 @@
                 isSyncing = true;
                 initialGuestSyncDone = false;
                 if (lastHostSyncSnapshot) {
-                    applySyncedPlayback({ ...lastHostSyncSnapshot, forceSeek: true, source: 'yt-ready' });
+                    applySyncedPlayback({ ...lastHostSyncSnapshot, forceSeek: false, source: 'yt-ready' });
                 } else {
                     applySyncedPlayback({
                         status: roomData.status,
                         currentTime: roomData.current_time_sec || 0,
                         sentAt: Date.now(),
-                        forceSeek: true,
+                        forceSeek: false,
                         source: 'db-ready',
                     });
                 }
@@ -933,7 +988,8 @@
             } else if (isHost) {
                 lastHostYtPos = roomData ? (roomData.current_time_sec || 0) : 0;
                 lastHostYtSampleAt = Date.now();
-                if (roomData && roomData.current_time_sec > 0) {
+                const currentYt = youtubePlayer.getCurrentTime ? (youtubePlayer.getCurrentTime() || 0) : 0;
+                if (roomData && roomData.current_time_sec > 2.5 && Math.abs(currentYt - roomData.current_time_sec) > 2.5) {
                     youtubePlayer.seekTo(roomData.current_time_sec, true);
                 }
                 if (roomData && roomData.status === 'play') {
@@ -967,9 +1023,31 @@
                 const prev = guestYtPrevState;
                 guestYtPrevState = state;
 
-                if (state === YT.PlayerState.PLAYING && (prev === YT.PlayerState.BUFFERING || postBufferAlignArmed)) {
-                    postBufferAlignArmed = false;
-                    schedulePostBufferRealign();
+                if (state === YT.PlayerState.PLAYING) {
+                    if (ytAutoplayFallbackTimer) {
+                        clearTimeout(ytAutoplayFallbackTimer);
+                        ytAutoplayFallbackTimer = null;
+                    }
+                    if (ytPendingSeekAfterStart !== null && (!roomData || roomData.status === 'play')) {
+                        const pendingTarget = ytPendingSeekAfterStart;
+                        ytPendingSeekAfterStart = null;
+                        const nowPos = youtubePlayer.getCurrentTime ? (youtubePlayer.getCurrentTime() || 0) : 0;
+                        if (Math.abs(nowPos - pendingTarget) > syncLib.SEEK_THRESHOLD_SEC) {
+                            isSyncing = true;
+                            postBufferAlignArmed = true;
+                            youtubePlayer.seekTo(pendingTarget, true);
+                            setTimeout(() => { isSyncing = false; }, 220);
+                        }
+                    } else if (prev === YT.PlayerState.BUFFERING || postBufferAlignArmed) {
+                        postBufferAlignArmed = false;
+                        schedulePostBufferRealign();
+                    }
+                    try {
+                        if (youtubePlayer.isMuted && !youtubePlayer.isMuted()) {
+                            guestHasInteracted = true;
+                            showAudioUnlockBar(false);
+                        }
+                    } catch (e) {}
                 }
 
                 if (isSyncing || isLeavingPage || !initialGuestSyncDone) return;
@@ -977,6 +1055,7 @@
                 if (state === YT.PlayerState.PLAYING && roomData && roomData.status === 'pause') {
                     isSyncing = true;
                     youtubePlayer.pauseVideo();
+                    showSyncIndicator('Video dijeda oleh Host. Menunggu Host memutar video.');
                     setTimeout(() => { isSyncing = false; }, 60);
                 } else if (state === YT.PlayerState.PAUSED && roomData && roomData.status === 'play') {
                     isSyncing = true;
@@ -1122,6 +1201,7 @@
             isSyncing = true;
 
             if (playerType === 'youtube' && youtubePlayer && typeof youtubePlayer.getCurrentTime === 'function') {
+                const ytState = youtubePlayer.getPlayerState ? youtubePlayer.getPlayerState() : -1;
                 const localTime = youtubePlayer.getCurrentTime() || 0;
                 const decision = syncLib.decideSyncAction({
                     status,
@@ -1132,25 +1212,44 @@
                 });
 
                 if (decision.action === 'seek_pause' || decision.action === 'pause') {
-                    if (decision.action === 'seek_pause') {
+                    ytPendingSeekAfterStart = null;
+                    if (decision.action === 'seek_pause' && ytState !== -1) {
                         youtubePlayer.seekTo(decision.targetTime, true);
                     }
                     try { youtubePlayer.pauseVideo(); } catch (e) {}
                     updateStatusDisplay('pause');
                     updateSyncHealthUI('synced', formatSyncDetail(decision.drift));
                 } else {
-                    if (decision.action === 'seek_play') {
-                        postBufferAlignArmed = true;
-                        youtubePlayer.seekTo(decision.targetTime, true);
-                        updateSyncHealthUI('adjusting', 'Menyelaraskan...');
-                    } else {
-                        updateSyncHealthUI('synced', formatSyncDetail(decision.drift));
-                    }
-                    const ytState = youtubePlayer.getPlayerState ? youtubePlayer.getPlayerState() : -1;
-                    if (ytState !== YT.PlayerState.PLAYING) {
+                    const notStartedYet = (ytState === -1 || ytState === YT.PlayerState.CUED);
+                    const isBuffering = (ytState === YT.PlayerState.BUFFERING);
+
+                    if (isBuffering && !forceSeek) {
+                        updateSyncHealthUI('adjusting', 'Memuat video...');
+                    } else if (notStartedYet) {
+                        ytPendingSeekAfterStart = decision.drift > syncLib.SEEK_THRESHOLD_SEC ? decision.targetTime : null;
+                        if (IS_MOBILE_BROWSER || !guestHasInteracted) {
+                            try {
+                                youtubePlayer.mute();
+                                showAudioUnlockBar(true);
+                            } catch (e) {}
+                        }
                         try { youtubePlayer.playVideo(); } catch (e) {}
+                        ensureYouTubeMutedAutoplayFallback();
+                        updateStatusDisplay('play');
+                    } else {
+                        if (decision.action === 'seek_play') {
+                            postBufferAlignArmed = true;
+                            youtubePlayer.seekTo(decision.targetTime, true);
+                            updateSyncHealthUI('adjusting', 'Menyelaraskan...');
+                        } else {
+                            updateSyncHealthUI('synced', formatSyncDetail(decision.drift));
+                        }
+                        if (ytState !== YT.PlayerState.PLAYING) {
+                            try { youtubePlayer.playVideo(); } catch (e) {}
+                            ensureYouTubeMutedAutoplayFallback();
+                        }
+                        updateStatusDisplay('play');
                     }
-                    updateStatusDisplay('play');
                 }
                 setTimeout(() => { isSyncing = false; }, 140);
                 return;
@@ -1177,7 +1276,7 @@
                 } else {
                     if (!guestHasInteracted && !videoPlayer.muted) {
                         videoPlayer.muted = true;
-                        enableAudioBtn.style.display = 'inline-flex';
+                        showAudioUnlockBar(true);
                     }
                     if (decision.action === 'seek_play') {
                         postBufferAlignArmed = true;
@@ -1194,7 +1293,7 @@
                     if (videoPlayer.paused && videoPlayer.readyState >= 2) {
                         videoPlayer.play().catch(() => {
                             videoPlayer.muted = true;
-                            enableAudioBtn.style.display = 'inline-flex';
+                            showAudioUnlockBar(true);
                             videoPlayer.play().catch(() => {});
                         });
                     }
@@ -1298,7 +1397,7 @@
             document.getElementById('nameModal').classList.remove('open');
 
             const data = preFetchedRoomData;
-            if (data && currentUserId !== data.host_id && syncLib.isYouTubeUrl(data.video_url) && (youtubeApiReady || (window.YT && window.YT.Player))) {
+            if (data && currentUserId !== data.host_id && syncLib.isYouTubeUrl(data.video_url) && (youtubeApiReady || window.__ytApiLoaded || (window.YT && window.YT.Player))) {
                 const videoId = syncLib.getYouTubeVideoId(data.video_url);
                 if (videoId) {
                     roomData = data;
@@ -1448,14 +1547,12 @@
 
                 if (isInitialLoad && ytPlayerCreatedInGesture) {
                     ytPlayerCreatedInGesture = false;
-                } else if (!isHost && isInitialLoad && roomData && roomData.status === 'play') {
-                    showStartWatchingOverlay(videoId);
                 } else {
                     showPlayerLoading(videoId, false);
                     const startPos = roomData ? (roomData.current_time_sec || 0) : 0;
-                    const shouldAuto = !isInitialLoad || (roomData && roomData.status === 'play');
+                    const shouldAuto = !isInitialLoad || Boolean(roomData && roomData.status === 'play');
                     const waitApi = setInterval(() => {
-                        if (youtubeApiReady || (window.YT && window.YT.Player)) {
+                        if (youtubeApiReady || window.__ytApiLoaded || (window.YT && window.YT.Player)) {
                             youtubeApiReady = true;
                             clearInterval(waitApi);
                             createYouTubePlayer(videoId, shouldAuto, isInitialLoad ? startPos : 0);
@@ -1497,7 +1594,7 @@
 
             if (!isHost && isInitialLoad) {
                 videoPlayer.muted = true;
-                enableAudioBtn.style.display = 'inline-flex';
+                showAudioUnlockBar(true);
                 videoPlayer.addEventListener('loadedmetadata', function onGuestMeta() {
                     videoPlayer.removeEventListener('loadedmetadata', onGuestMeta);
                     initialGuestSyncDone = true;
@@ -2230,13 +2327,19 @@
             html5ListenersBound = true;
 
             enableAudioBtn.addEventListener('click', () => {
+                guestHasInteracted = true;
                 videoPlayer.muted = false;
                 videoPlayer.volume = 1;
-                if (youtubePlayer && youtubePlayer.unMute) {
-                    try { youtubePlayer.unMute(); youtubePlayer.setVolume(100); } catch (e) {}
+                if (youtubePlayer) {
+                    try {
+                        if (youtubePlayer.unMute) youtubePlayer.unMute();
+                        if (youtubePlayer.setVolume) youtubePlayer.setVolume(100);
+                        if (roomData && roomData.status === 'play' && youtubePlayer.getPlayerState && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                            youtubePlayer.playVideo();
+                        }
+                    } catch (e) {}
                 }
-                enableAudioBtn.style.display = 'none';
-                guestHasInteracted = true;
+                showAudioUnlockBar(false);
             });
 
             videoPlayer.addEventListener('play', () => {

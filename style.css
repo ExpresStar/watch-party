@@ -1007,6 +1007,8 @@ button {
 }
 
 .video-wrapper video,
+.video-wrapper .yt-player-stage,
+.video-wrapper .yt-player-stage iframe,
 .video-wrapper #youtubePlayer,
 .video-wrapper #youtubePlayer iframe,
 .video-wrapper #gdrivePlayer,
@@ -1066,8 +1068,8 @@ button {
 /* Video Stage Floating Controls */
 .stage-controls {
   position: absolute;
-  bottom: 12px;
-  left: 12px;
+  top: 10px;
+  right: 10px;
   z-index: 20;
   display: flex;
   align-items: center;
@@ -1624,6 +1626,7 @@ button {
 }
 
 .video-wrapper.ios-fake-fullscreen > video,
+.video-wrapper.ios-fake-fullscreen > .yt-player-stage,
 .video-wrapper.ios-fake-fullscreen > #youtubePlayer,
 .video-wrapper.ios-fake-fullscreen > #gdrivePlayer {
   position: fixed;
