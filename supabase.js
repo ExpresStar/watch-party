@@ -205,7 +205,7 @@ async function createRoom(videoUrl) {
         id: roomId,
         video_url: videoUrl,
         current_time_sec: 0,
-        status: "pause",
+        status: "play",
         host_id: hostId,
         updated_at: new Date().toISOString(),
       },

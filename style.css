@@ -55,16 +55,43 @@
   --danger-soft: rgba(184, 45, 35, 0.1);
 }
 
-html,
-body {
+html {
   min-height: 100%;
   background: var(--bg-canvas);
+}
+
+body {
+  min-height: 100%;
+  background: transparent;
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+  position: relative;
+  z-index: 0;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: var(--bg-canvas);
+  background-image:
+    linear-gradient(180deg, rgba(10, 9, 9, 0.72) 0%, rgba(10, 9, 9, 0.82) 100%),
+    url("assets/bg-main.jpg");
+  background-position: center center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+[data-theme="light"] body::before {
+  background-image:
+    linear-gradient(180deg, rgba(246, 243, 237, 0.86) 0%, rgba(246, 243, 237, 0.92) 100%),
+    url("assets/bg-main.jpg");
 }
 
 @supports (-webkit-touch-callout: none) {
@@ -491,7 +518,7 @@ button {
 }
 
 .landing-lead {
-  color: var(--text-muted);
+  color: #ccc4b8;
   font-size: 1.02rem;
   max-width: 44ch;
   margin-bottom: 24px;
@@ -510,6 +537,11 @@ button {
   align-items: baseline;
   gap: 10px;
   font-size: 0.9rem;
+  color: #ccc4b8;
+}
+
+[data-theme="light"] .landing-lead,
+[data-theme="light"] .landing-specs li {
   color: var(--text-muted);
 }
 
@@ -652,7 +684,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  min-height: 40px;
+  min-height: 44px;
   padding: 7px 12px;
   border-radius: var(--radius-md);
   background: var(--bg-elevated);

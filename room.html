@@ -818,10 +818,18 @@
             updateSyncHealthUI('default', 'Mode Mandiri (Drive)');
         }
 
+        function isHostOnlineInPresence() {
+            const state = window.currentPresenceState || {};
+            return Object.entries(state).some(([uid, list]) => {
+                if (uid === currentUserId || !Array.isArray(list)) return false;
+                return list.some(item => item && item.user_id !== currentUserId && Boolean(item.is_host));
+            });
+        }
+
         function ensureYouTubeMutedAutoplayFallback() {
             if (ytAutoplayFallbackTimer) clearTimeout(ytAutoplayFallbackTimer);
             ytAutoplayFallbackTimer = setTimeout(() => {
-                if (!youtubePlayer || playerType !== 'youtube' || isLeavingPage || isHost) return;
+                if (!youtubePlayer || playerType !== 'youtube' || isLeavingPage) return;
                 if (!roomData || roomData.status !== 'play') return;
                 const state = youtubePlayer.getPlayerState ? youtubePlayer.getPlayerState() : -1;
                 if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
@@ -841,7 +849,7 @@
             youtubePlayerStage.style.display = 'block';
             showPlayerLoading(videoId, false);
 
-            const shouldMuteForAutoplay = !isHost && autoPlay && (IS_MOBILE_BROWSER || !guestHasInteracted);
+            const shouldMuteForAutoplay = autoPlay && (IS_MOBILE_BROWSER || (!isHost && !guestHasInteracted));
             const pv = {
                 playsinline: 1,
                 controls: 1,
@@ -994,6 +1002,8 @@
                 }
                 if (roomData && roomData.status === 'play') {
                     try { youtubePlayer.playVideo(); } catch (e) {}
+                    updateStatusDisplay('play');
+                    ensureYouTubeMutedAutoplayFallback();
                 }
                 setTimeout(() => { if (!isTempHost) isSyncing = false; }, 500);
             }
@@ -1053,10 +1063,14 @@
                 if (isSyncing || isLeavingPage || !initialGuestSyncDone) return;
 
                 if (state === YT.PlayerState.PLAYING && roomData && roomData.status === 'pause') {
-                    isSyncing = true;
-                    youtubePlayer.pauseVideo();
-                    showSyncIndicator('Video dijeda oleh Host. Menunggu Host memutar video.');
-                    setTimeout(() => { isSyncing = false; }, 60);
+                    if (isHostOnlineInPresence()) {
+                        isSyncing = true;
+                        youtubePlayer.pauseVideo();
+                        showSyncIndicator('Video dijeda oleh Host. Menunggu Host memutar video.');
+                        setTimeout(() => { isSyncing = false; }, 60);
+                    } else {
+                        showSyncIndicator('Host belum terhubung. Video diputar sementara di perangkatmu.');
+                    }
                 } else if (state === YT.PlayerState.PAUSED && roomData && roomData.status === 'play') {
                     isSyncing = true;
                     youtubePlayer.playVideo();
@@ -2347,9 +2361,14 @@
                 if (!isHost) guestHasInteracted = true;
                 if (!isHost) {
                     if (roomData && roomData.status === 'pause') {
-                        isSyncing = true;
-                        videoPlayer.pause();
-                        setTimeout(() => { isSyncing = false; }, 60);
+                        if (isHostOnlineInPresence()) {
+                            isSyncing = true;
+                            videoPlayer.pause();
+                            showSyncIndicator('Video dijeda oleh Host. Menunggu Host memutar video.');
+                            setTimeout(() => { isSyncing = false; }, 60);
+                        } else {
+                            showSyncIndicator('Host belum terhubung. Video diputar sementara di perangkatmu.');
+                        }
                     }
                     return;
                 }
