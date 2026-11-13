@@ -35,26 +35,6 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-[data-theme="light"] {
-  --bg-canvas: #f6f3ed;
-  --bg-surface: #ffffff;
-  --bg-elevated: #efeae1;
-  --bg-subtle: #e5dfd4;
-  --border: #dcd5ca;
-  --border-strong: #c2b8aa;
-  --text: #191714;
-  --text-muted: #595248;
-  --accent: #b82d23;
-  --accent-hover: #9f251c;
-  --accent-soft: rgba(184, 45, 35, 0.1);
-  --amber: #9c5709;
-  --amber-soft: rgba(156, 87, 9, 0.1);
-  --green: #15784b;
-  --green-soft: rgba(21, 120, 75, 0.1);
-  --danger: #b82d23;
-  --danger-soft: rgba(184, 45, 35, 0.1);
-}
-
 html {
   min-height: 100%;
   background: var(--bg-canvas);
@@ -86,12 +66,6 @@ body::before {
   background-position: center center;
   background-size: cover;
   background-repeat: no-repeat;
-}
-
-[data-theme="light"] body::before {
-  background-image:
-    linear-gradient(180deg, rgba(246, 243, 237, 0.86) 0%, rgba(246, 243, 237, 0.92) 100%),
-    url("assets/bg-main.jpg");
 }
 
 @supports (-webkit-touch-callout: none) {
@@ -288,47 +262,14 @@ button {
 }
 
 .brand-icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  background: var(--accent);
-  color: #ffffff;
-  display: grid;
-  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: #161211;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  display: block;
+  object-fit: cover;
   flex-shrink: 0;
-}
-
-/* Theme Toggle */
-.theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 40px;
-  padding: 6px 12px;
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  font-size: 0.85rem;
-  font-weight: 600;
-  transition: color 0.15s ease, border-color 0.15s ease;
-}
-
-.theme-toggle:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-
-.theme-toggle .sun-icon {
-  display: none;
-}
-
-[data-theme="light"] .theme-toggle .sun-icon {
-  display: inline-flex;
-}
-
-[data-theme="light"] .theme-toggle .moon-icon {
-  display: none;
 }
 
 /* Toast Notification */
@@ -538,11 +479,6 @@ button {
   gap: 10px;
   font-size: 0.9rem;
   color: #ccc4b8;
-}
-
-[data-theme="light"] .landing-lead,
-[data-theme="light"] .landing-specs li {
-  color: var(--text-muted);
 }
 
 .landing-specs strong {
@@ -1695,10 +1631,6 @@ button {
     display: none;
   }
 
-  .theme-toggle-text {
-    display: none;
-  }
-
   .btn,
   .segmented-tab,
   .room-code-btn,
@@ -1710,7 +1642,6 @@ button {
   .viewers-btn,
   .reaction-btn,
   .stage-ctrl-btn,
-  .theme-toggle,
   .modal-close {
     min-width: 44px;
     min-height: 44px;
