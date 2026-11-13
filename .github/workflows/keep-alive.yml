@@ -1,0 +1,73 @@
+name: Keep Alive Ping (6h)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Ping Supabase database and optional site URL
+        env:
+          SUPABASE_URL_SECRET: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY_SECRET: ${{ secrets.SUPABASE_ANON_KEY }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          node - <<'EOF'
+          const fs = require('fs');
+
+          async function run() {
+            let supabaseUrl = process.env.SUPABASE_URL_SECRET || '';
+            let supabaseKey = process.env.SUPABASE_KEY_SECRET || '';
+
+            if (!supabaseUrl || !supabaseKey) {
+              const src = fs.readFileSync('supabase.js', 'utf8');
+              const urlMatch = src.match(/SUPABASE_URL\s*=\s*["']([^"']+)["']/);
+              const keyMatch = src.match(/SUPABASE_ANON_KEY\s*=\s*[\s\S]*?["']([^"']+)["']/);
+              if (!supabaseUrl && urlMatch) supabaseUrl = urlMatch[1];
+              if (!supabaseKey && keyMatch) supabaseKey = keyMatch[1];
+            }
+
+            if (!supabaseUrl || !supabaseKey) {
+              console.error('Supabase URL or anon key not found.');
+              process.exit(1);
+            }
+
+            console.log(`::add-mask::${supabaseKey}`);
+
+            const dbEndpoint = `${supabaseUrl.replace(/\/+$/, '')}/rest/v1/rooms?select=id&limit=1`;
+            const dbRes = await fetch(dbEndpoint, {
+              method: 'GET',
+              headers: {
+                apikey: supabaseKey,
+                Authorization: `Bearer ${supabaseKey}`,
+              },
+            });
+
+            console.log(`Supabase ping HTTP ${dbRes.status}`);
+            if (!dbRes.ok) {
+              console.error(await dbRes.text());
+              process.exit(1);
+            }
+
+            const siteUrl = (process.env.SITE_URL || '').trim();
+            if (siteUrl) {
+              const siteRes = await fetch(siteUrl, { method: 'GET' });
+              console.log(`Site ping (${siteUrl}) HTTP ${siteRes.status}`);
+              if (!siteRes.ok) process.exit(1);
+            }
+          }
+
+          run().catch((err) => {
+            console.error(err);
+            process.exit(1);
+          });
+          EOF

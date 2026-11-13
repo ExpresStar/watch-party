@@ -13,20 +13,23 @@ const SUPABASE_ANON_KEY =
 
 // Inisialisasi Supabase client
 // FIX: Tambahkan realtime config untuk reconnection yang lebih baik di iOS
-const supabaseClient = window.supabase.createClient(
-  SUPABASE_URL,
-  SUPABASE_ANON_KEY,
-  {
-    realtime: {
-      params: {
-        eventsPerSecond: 10,
-      },
-    },
-    db: {
-      schema: "public",
-    },
-  },
-);
+const supabaseClient =
+  typeof window !== "undefined" && window.supabase
+    ? window.supabase.createClient(
+        SUPABASE_URL,
+        SUPABASE_ANON_KEY,
+        {
+          realtime: {
+            params: {
+              eventsPerSecond: 10,
+            },
+          },
+          db: {
+            schema: "public",
+          },
+        },
+      )
+    : null;
 
 // ===========================================
 // iOS / DEVICE DETECTION
@@ -155,13 +158,13 @@ function isHostOfRoom(roomId) {
  * Generate UUID v4
  */
 /**
- * Generate short room ID — 6 karakter alphanumeric.
+ * Generate short room ID - 6 karakter alphanumeric.
  * Menggunakan karakter yang mudah dibaca dan diketik (tanpa O/0, I/l/1).
- * Total kombinasi: 52^6 ≈ 19 miliar — collision sangat kecil.
+ * Total kombinasi: 52^6 ≈ 19 miliar - collision sangat kecil.
  */
 function generateShortId(length = 6) {
-  // Abaikan karakter yang mirip supaya ga bingung saat diketik
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  // Huruf kapital & angka tanpa karakter mirip (O/0, I/1) agar mudah diketik & dibaca
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let result = "";
   for (let i = 0; i < length; i++) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -182,7 +185,7 @@ async function createRoom(videoUrl) {
   let attempts = 0;
   const MAX_ATTEMPTS = 5;
 
-  // Collision check — pastikan room ID belum dipakai
+  // Collision check - pastikan room ID belum dipakai
   while (attempts < MAX_ATTEMPTS) {
     const { data: existing } = await supabaseClient
       .from("rooms")
@@ -224,18 +227,33 @@ async function createRoom(videoUrl) {
  * Ambil data room berdasarkan ID
  */
 async function getRoom(roomId) {
-  const { data, error } = await supabaseClient
+  const cleanId = (roomId || "").trim();
+  if (!cleanId) throw new Error("Room ID kosong");
+
+  const { data: exactData, error: exactErr } = await supabaseClient
     .from("rooms")
     .select("*")
-    .eq("id", roomId)
-    .single();
+    .eq("id", cleanId)
+    .maybeSingle();
 
-  if (error) {
-    console.error("Error fetching room:", error);
-    throw error;
+  if (exactErr) {
+    console.error("Error fetching room:", exactErr);
+    throw exactErr;
   }
+  if (exactData) return exactData;
 
-  return data;
+  // Fallback case-insensitive untuk Room ID uppercase baru
+  const { data: ilikeData, error: ilikeErr } = await supabaseClient
+    .from("rooms")
+    .select("*")
+    .ilike("id", cleanId)
+    .limit(1)
+    .maybeSingle();
+
+  if (ilikeErr || !ilikeData) {
+    throw ilikeErr || new Error("Room tidak ditemukan");
+  }
+  return ilikeData;
 }
 
 /**
@@ -409,8 +427,15 @@ function subscribeToPresence(roomId, userId, isHost, userName, callbacks) {
     },
   });
 
-  let heartbeatInterval = null;
-  let reconnectTimeout = null;
+  channel._heartbeatInterval = null;
+  channel._reconnectTimeout = null;
+  channel._presencePayload = {
+    user_id: userId,
+    user_name: userName || "Guest",
+    is_host: isHost,
+    joined_at: new Date().toISOString(),
+    online: true,
+  };
 
   channel
     .on("presence", { event: "sync" }, () => {
@@ -433,69 +458,57 @@ function subscribeToPresence(roomId, userId, isHost, userName, callbacks) {
       console.log("[Presence] Status:", status);
 
       if (status === "SUBSCRIBED") {
-        // Clear reconnect timeout
-        if (reconnectTimeout) {
-          clearTimeout(reconnectTimeout);
-          reconnectTimeout = null;
+        if (channel._reconnectTimeout) {
+          clearTimeout(channel._reconnectTimeout);
+          channel._reconnectTimeout = null;
+        }
+        if (channel._heartbeatInterval) {
+          clearInterval(channel._heartbeatInterval);
+          channel._heartbeatInterval = null;
         }
 
-        // Track this user with name
-        await channel.track({
-          user_id: userId,
-          user_name: userName || "Guest",
-          is_host: isHost,
-          joined_at: new Date().toISOString(),
-          online: true,
-        });
+        await channel.track(channel._presencePayload);
 
-        // Heartbeat: re-track presence setiap 30 detik untuk menjaga koneksi di iOS
-        heartbeatInterval = setInterval(async () => {
+        // Heartbeat: pertahankan koneksi iOS tanpa menimpa field voice_on / is_host
+        channel._heartbeatInterval = setInterval(async () => {
           try {
-            await channel.track({
-              user_id: userId,
-              user_name: userName || "Guest",
-              is_host: isHost,
-              joined_at: new Date().toISOString(),
-              online: true,
-            });
+            await channel.track(channel._presencePayload);
           } catch (e) {
             console.warn("[Presence] Heartbeat failed:", e);
           }
         }, 30000);
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         console.warn("[Presence] Connection error:", status, err);
-        // Auto-reconnect setelah 3 detik
-        if (reconnectTimeout) clearTimeout(reconnectTimeout);
-        reconnectTimeout = setTimeout(() => {
+        if (channel._reconnectTimeout) clearTimeout(channel._reconnectTimeout);
+        channel._reconnectTimeout = setTimeout(() => {
           console.log("[Presence] Attempting reconnect...");
-          if (heartbeatInterval) {
-            clearInterval(heartbeatInterval);
-            heartbeatInterval = null;
+          if (channel._heartbeatInterval) {
+            clearInterval(channel._heartbeatInterval);
+            channel._heartbeatInterval = null;
           }
           channel.subscribe();
         }, 3000);
       } else if (status === "CLOSED") {
-        // Bersihkan
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval);
-          heartbeatInterval = null;
+        if (channel._heartbeatInterval) {
+          clearInterval(channel._heartbeatInterval);
+          channel._heartbeatInterval = null;
         }
       }
     });
-
-  // Simpan ref untuk cleanup
-  channel._heartbeatInterval = heartbeatInterval;
-  channel._reconnectTimeout = reconnectTimeout;
 
   return channel;
 }
 
 /**
- * Update presence status (e.g., when playing/pausing)
+ * Update presence status (e.g., when playing/pausing or voice toggle)
  */
 async function updatePresence(channel, data) {
   if (channel) {
-    await channel.track(data);
+    channel._presencePayload = {
+      ...(channel._presencePayload || {}),
+      ...data,
+    };
+    await channel.track(channel._presencePayload);
   }
 }
 
@@ -561,24 +574,54 @@ function clearChatHistory(roomId) {
 /**
  * Subscribe to chat channel for messaging
  */
-function subscribeToChat(roomId, callback) {
+function subscribeToChat(roomId, callbacks) {
   const channel = supabaseClient.channel(`chat:${roomId}`, {
     config: {
       broadcast: { self: false }, // Don't receive own messages
     },
   });
 
+  const onMessage =
+    typeof callbacks === "function" ? callbacks : callbacks?.onMessage;
+
   channel
     .on("broadcast", { event: "message" }, (payload) => {
-      // Save to history
       saveChatMessage(roomId, payload.payload);
-      if (callback) {
-        callback(payload.payload);
+      if (onMessage) onMessage(payload.payload);
+    })
+    .on("broadcast", { event: "chat_request" }, (payload) => {
+      if (callbacks && callbacks.onChatRequest) {
+        callbacks.onChatRequest(payload.payload);
+      }
+    })
+    .on("broadcast", { event: "chat_sync" }, (payload) => {
+      if (callbacks && callbacks.onChatSync) {
+        callbacks.onChatSync(payload.payload);
       }
     })
     .subscribe();
 
   return channel;
+}
+
+async function broadcastChatRequest(channel) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "chat_request",
+      payload: { user_id: getUserId() },
+    });
+  }
+}
+
+async function broadcastChatSync(channel, messages) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "chat_sync",
+      payload: { messages: Array.isArray(messages) ? messages.slice(-50) : [] },
+    });
+  }
 }
 
 /**
@@ -668,23 +711,99 @@ function subscribeToSync(roomId, callbacks) {
         callbacks.onHostReclaim(payload.payload);
       }
     })
+    .on("broadcast", { event: "sync_tick" }, (payload) => {
+      if (callbacks && callbacks.onSyncTick) {
+        callbacks.onSyncTick(payload.payload);
+      }
+    })
+    .on("broadcast", { event: "sync_ping" }, (payload) => {
+      if (callbacks && callbacks.onSyncPing) {
+        callbacks.onSyncPing(payload.payload);
+      }
+    })
+    .on("broadcast", { event: "sync_pong" }, (payload) => {
+      if (callbacks && callbacks.onSyncPong) {
+        callbacks.onSyncPong(payload.payload);
+      }
+    })
     .subscribe();
 
   return channel;
 }
 
 /**
- * Broadcast status change (play/pause) - instant sync
+ * Broadcast status change (play/pause/seek) - instant sync
  */
-async function broadcastStatus(channel, status, currentTime) {
+async function broadcastStatus(channel, status, currentTime, meta = {}) {
   if (channel) {
+    const now = Date.now();
     await channel.send({
       type: "broadcast",
       event: "status",
       payload: {
         status: status,
         currentTime: currentTime,
-        timestamp: Date.now(),
+        timestamp: now,
+        sentAt: now,
+        forceSeek: Boolean(meta.forceSeek),
+        seq: meta.seq || 0,
+      },
+    });
+  }
+}
+
+/**
+ * Broadcast lightweight playback tick while host is playing (no DB write)
+ */
+async function broadcastSyncTick(channel, status, currentTime, seq = 0) {
+  if (channel) {
+    const now = Date.now();
+    await channel.send({
+      type: "broadcast",
+      event: "sync_tick",
+      payload: {
+        status: status,
+        currentTime: currentTime,
+        timestamp: now,
+        sentAt: now,
+        seq: seq,
+      },
+    });
+  }
+}
+
+/**
+ * Guest sends ping to calibrate clock offset & RTT against Host
+ */
+async function broadcastSyncPing(channel, clientTime = Date.now()) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "sync_ping",
+      payload: {
+        user_id: getUserId(),
+        clientTime: clientTime,
+      },
+    });
+  }
+}
+
+/**
+ * Host replies to ping with current clock + playback snapshot
+ */
+async function broadcastSyncPong(channel, state) {
+  if (channel) {
+    const now = Date.now();
+    await channel.send({
+      type: "broadcast",
+      event: "sync_pong",
+      payload: {
+        targetUserId: state.targetUserId || null,
+        clientTime: state.clientTime,
+        hostTime: now,
+        sentAt: now,
+        status: state.status,
+        currentTime: state.currentTime,
       },
     });
   }
@@ -765,40 +884,47 @@ async function broadcastKnockResponse(
 }
 
 /**
- * Broadcast sync request — guest asks host for current playback state
+ * Broadcast sync request - guest asks host for current playback state
  */
 async function broadcastSyncRequest(channel) {
   if (channel) {
+    const now = Date.now();
     await channel.send({
       type: "broadcast",
       event: "sync_request",
       payload: {
         user_id: getUserId(),
-        timestamp: Date.now(),
+        timestamp: now,
+        clientTime: now,
       },
     });
   }
 }
 
 /**
- * Broadcast sync response — host sends current state to guest
+ * Broadcast sync response - host sends current state to guest
  */
 async function broadcastSyncResponse(channel, state) {
   if (channel) {
+    const now = Date.now();
     await channel.send({
       type: "broadcast",
       event: "sync_response",
       payload: {
+        targetUserId: state.targetUserId || null,
         status: state.status,
         currentTime: state.currentTime,
-        timestamp: Date.now(),
+        timestamp: now,
+        sentAt: now,
+        hostTime: now,
+        clientTime: state.clientTime || null,
       },
     });
   }
 }
 
 /**
- * Broadcast host transfer — host leaves, assigns new temp host
+ * Broadcast host transfer - host leaves, assigns new temp host
  */
 async function broadcastHostTransfer(channel, newHostId, newHostName) {
   if (channel) {
@@ -815,7 +941,7 @@ async function broadcastHostTransfer(channel, newHostId, newHostName) {
 }
 
 /**
- * Broadcast host reclaim — original host rejoins, takes back control
+ * Broadcast host reclaim - original host rejoins, takes back control
  */
 async function broadcastHostReclaim(channel, originalHostId) {
   if (channel) {
@@ -931,9 +1057,39 @@ function subscribeToBookmarks(roomId, callback) {
         callback.onDelete(payload.payload);
       }
     })
+    .on("broadcast", { event: "bookmark_request" }, (payload) => {
+      if (callback && callback.onRequest) {
+        callback.onRequest(payload.payload);
+      }
+    })
+    .on("broadcast", { event: "bookmark_sync" }, (payload) => {
+      if (callback && callback.onSync) {
+        callback.onSync(payload.payload);
+      }
+    })
     .subscribe();
 
   return channel;
+}
+
+async function broadcastBookmarkRequest(channel) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "bookmark_request",
+      payload: { user_id: getUserId() },
+    });
+  }
+}
+
+async function broadcastBookmarkSync(channel, bookmarks) {
+  if (channel) {
+    await channel.send({
+      type: "broadcast",
+      event: "bookmark_sync",
+      payload: { bookmarks: Array.isArray(bookmarks) ? bookmarks : [] },
+    });
+  }
 }
 
 /**
@@ -1225,32 +1381,25 @@ async function unsubscribeFromQueue(channel) {
 
 /**
  * Kata terlarang yang akan difilter di chat & nama.
- * Daftar: kotor, anjing, babi, memek, ppk, mmk, kntl, anj, ajg
- * Catatan: "anjir" dan "anjay" diizinkan (tidak difilter)
+ * Menggunakan token-boundary matching untuk kata pendek agar kata biasa
+ * ("panjang", "cewek", "telepon", "nokia") tidak terkena false positive.
+ * Catatan: "anjir" dan "anjay" (beserta perpanjangannya) tetap diizinkan.
  */
-const BAD_WORDS = [
-  "kotor",
+const SUBSTRING_BAD_WORDS = [
   "anjing",
-  "babi",
   "memek",
-  "ppk",
-  "mmk",
-  "kntl",
-  "anj",
-  "ajg",
   "pepek",
   "kontol",
   "jembut",
   "perek",
   "puki",
+  "pukih",
+  "pukik",
+  "vuki",
   "ngentot",
   "ngewe",
   "ngewek",
-  "pele",
-  "pelek",
   "nonok",
-  "ewe",
-  "ewek",
   "meki",
   "veveg",
   "memeg",
@@ -1258,57 +1407,75 @@ const BAD_WORDS = [
   "vevek",
   "fefek",
   "kuntul",
-  "knt",
   "memeq",
-  "vuki",
-  "puki",
-  "pukih",
-  "pukik",
   "memk",
+];
+
+const BOUNDARY_BAD_WORDS = [
+  "babi",
+  "anj",
+  "ajg",
+  "njing",
+  "ppk",
   "mmk",
+  "kntl",
+  "knt",
+  "ewe",
+  "ewek",
+  "pele",
+  "pelek",
   "nnk",
   "nok",
 ];
 
-/**
- * Pattern aman — kata yang mengandung "anj" tapi boleh.
- * "anjir" dan "anjay" TIDAK akan difilter meskipun mengandung substring "anj".
- */
-const SAFE_ANJ_PATTERNS = [
-  "anjir",
-  "anjay",
-  "anjirr",
-  "anjayy",
-  "anjirrr",
-  "anjayyy",
-];
+const SAFE_ANJ_REGEX = /^anj(?:i+r+|a+y+)$/i;
+
+function isTokenProfane(token) {
+  if (!token) return null;
+  const lower = token.toLowerCase();
+  if (SAFE_ANJ_REGEX.test(lower)) return null;
+
+  // Normalisasi huruf berulang (anjjjj -> anj, baaabi -> babi)
+  const collapsed = lower.replace(/(.)\1+/g, "$1");
+
+  if (BOUNDARY_BAD_WORDS.includes(lower) || BOUNDARY_BAD_WORDS.includes(collapsed)) {
+    return lower;
+  }
+  for (const bad of SUBSTRING_BAD_WORDS) {
+    if (lower.includes(bad) || collapsed.includes(bad)) {
+      return bad;
+    }
+  }
+  return null;
+}
 
 /**
  * Cek apakah teks mengandung kata terlarang.
- * Logic: hapus dulu kata aman (anjir/anjay), baru cek bad words.
  * Returns: { clean: boolean, word?: string }
  */
 function containsBadWord(text) {
   if (!text || typeof text !== "string") return { clean: true };
-  let lower = text.toLowerCase().trim();
-
-  // 1. Hapus kata aman yang mengandung "anj" supaya ga false positive
-  for (const safe of SAFE_ANJ_PATTERNS) {
-    lower = lower.split(safe).join("");
-  }
-
-  // 2. Cek bad words
-  for (const bad of BAD_WORDS) {
-    if (lower.includes(bad.toLowerCase())) {
-      return { clean: false, word: bad };
+  const tokens = text.match(/[a-zA-Z0-9]+/g) || [];
+  for (const token of tokens) {
+    const found = isTokenProfane(token);
+    if (found) {
+      return { clean: false, word: found };
     }
   }
-
+  // Cek juga variasi terselubung satu huruf berspasi/simbol (misal: "k.o.n.t.o.l" / "a n j i n g")
+  const spacedGroups = text.match(/\b[a-zA-Z0-9](?:[\s._*-]+[a-zA-Z0-9]){2,}\b/g) || [];
+  for (const group of spacedGroups) {
+    const joined = group.replace(/[\s._*-]+/g, "");
+    const found = isTokenProfane(joined);
+    if (found) {
+      return { clean: false, word: found };
+    }
+  }
   return { clean: true };
 }
 
 /**
- * Cek nama — sama seperti containsBadWord, dipakai untuk validasi nama user.
+ * Cek nama - menggunakan aturan filter kata terlarang yang sama.
  * Returns: { clean: boolean, word?: string }
  */
 function containsBadWordStrict(text) {
@@ -1316,40 +1483,20 @@ function containsBadWordStrict(text) {
 }
 
 /**
- * Sensor kata kotor di teks — mengganti dengan ***
- * Logic: hapus dulu kata aman (anjir/anjay), baru cek dan replace bad words.
+ * Sensor kata kotor di teks dengan *** sambil menjaga huruf kapital & kata normal.
  */
 function censorBadWords(text) {
   if (!text || typeof text !== "string") return text;
-  let result = text;
-
-  // 1. Hapus kata aman yang mengandung "anj" supaya ga false positive
-  const safePlaceholders = [];
-  for (const safe of SAFE_ANJ_PATTERNS) {
-    const placeholder = `__SAFE_${safePlaceholders.length}__`;
-    while (result.toLowerCase().includes(safe.toLowerCase())) {
-      const idx = result.toLowerCase().indexOf(safe.toLowerCase());
-      result =
-        result.substring(0, idx) +
-        placeholder +
-        result.substring(idx + safe.length);
-    }
-    safePlaceholders.push({ placeholder, original: safe });
-  }
-
-  // 2. Replace bad words dengan ***
-  for (const bad of BAD_WORDS) {
-    const regex = new RegExp(bad.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-    result = result.replace(regex, "***");
-  }
-
-  // 3. Restore kata aman
-  for (const { placeholder, original } of safePlaceholders) {
-    // Restore dengan case yang sesuai — cari placeholder case-insensitive
-    const restoreRegex = new RegExp(placeholder, "gi");
-    result = result.replace(restoreRegex, original);
-  }
-
+  let result = text.replace(/[a-zA-Z0-9]+/g, (token) => {
+    return isTokenProfane(token) ? "***" : token;
+  });
+  result = result.replace(
+    /\b[a-zA-Z0-9](?:[\s._*-]+[a-zA-Z0-9]){2,}\b/g,
+    (group) => {
+      const joined = group.replace(/[\s._*-]+/g, "");
+      return isTokenProfane(joined) ? "***" : group;
+    },
+  );
   return result;
 }
 
@@ -1404,9 +1551,11 @@ function exitIOSFullscreen(element) {
 }
 
 // Export untuk digunakan di file lain
+if (typeof window !== "undefined") {
 window.watchParty = {
   supabase: supabaseClient,
   generateUUID,
+  generateShortId,
   getUserId,
   createRoom,
   getRoom,
@@ -1420,12 +1569,17 @@ window.watchParty = {
   unsubscribeFromPresence,
   subscribeToChat,
   sendChatMessage,
+  broadcastChatRequest,
+  broadcastChatSync,
   unsubscribeFromChat,
   getChatHistory,
   saveChatMessage,
   clearChatHistory,
   subscribeToSync,
   broadcastStatus,
+  broadcastSyncTick,
+  broadcastSyncPing,
+  broadcastSyncPong,
   broadcastReaction,
   broadcastKick,
   broadcastKnock,
@@ -1447,6 +1601,8 @@ window.watchParty = {
   subscribeToBookmarks,
   broadcastBookmarkAdd,
   broadcastBookmarkDelete,
+  broadcastBookmarkRequest,
+  broadcastBookmarkSync,
   unsubscribeFromBookmarks,
   // Queue
   getQueue,
@@ -1478,3 +1634,13 @@ window.watchParty = {
   toggleIOSFullscreen,
   exitIOSFullscreen,
 };
+}
+
+if (typeof module === "object" && module.exports) {
+  module.exports = {
+    generateShortId,
+    containsBadWord,
+    containsBadWordStrict,
+    censorBadWords,
+  };
+}
