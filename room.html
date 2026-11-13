@@ -453,10 +453,11 @@
         const DB_TIME_SAVE_INTERVAL_MS = 5000;
         const PING_REFRESH_INTERVAL_MS = 20000;
         const PLAYER_POLL_MS = IS_IOS_DEVICE ? 750 : 400;
-        const SYNC_SEEK_COOLDOWN_MS = IS_IOS_DEVICE ? 4500 : 1800;
-        const YT_TICK_SEEK_THRESHOLD_SEC = IS_IOS_DEVICE ? 1.10 : syncLib.SEEK_THRESHOLD_SEC;
-        const HTML5_TICK_SEEK_THRESHOLD_SEC = IS_IOS_DEVICE ? 1.10 : 0.70;
-        const HTML5_RATE_DEADBAND_SEC = IS_IOS_DEVICE ? 0.22 : 0.08;
+        const SYNC_SEEK_COOLDOWN_MS = IS_IOS_DEVICE ? 8500 : 7000;
+        const YT_TICK_SEEK_THRESHOLD_SEC = IS_IOS_DEVICE ? 2.10 : 1.85;
+        const YT_RATE_DEADBAND_SEC = 0.35;
+        const HTML5_TICK_SEEK_THRESHOLD_SEC = IS_IOS_DEVICE ? 2.10 : 1.80;
+        const HTML5_RATE_DEADBAND_SEC = IS_IOS_DEVICE ? 0.25 : 0.14;
 
         let initialGuestSyncDone = false;
         let clockOffsetMs = 0; // estimatedHostNow = Date.now() + clockOffsetMs
@@ -465,14 +466,20 @@
         let hostTickSeq = 0;
         let lastDbTimeSaveAt = 0;
         let lastSyncSeekAt = 0;
+        let lastSeekStartedAt = 0;
+        let lastSeekTargetSec = null;
+        let measuredSeekLeadSec = IS_IOS_DEVICE ? 0.90 : (IS_MOBILE_BROWSER ? 0.75 : 0.40);
+        let pendingManualResync = false;
+        let lastSyncSessionId = '';
+        let lastSyncSeq = 0;
         let lastHtml5RateAt = 0;
+        let lastYtRateAt = 0;
+        let ytAvailableRates = [];
         let lastRenderedTimeText = '';
         let lastHostSyncSnapshot = null; // { status, currentTime, sentAt }
         let lastHostYtPos = 0;
         let lastHostYtSampleAt = 0;
-        let guestYtPrevState = null;
-        let postBufferAlignArmed = false;
-        let postBufferRetries = 0;
+        let lastHostYtState = -1;
         let hostTickInterval = null;
         let pingRefreshInterval = null;
         let guestDbBackupInterval = null;
@@ -656,6 +663,11 @@
                 ytAutoplayFallbackTimer = null;
             }
             ytPendingSeekAfterStart = null;
+            lastSeekStartedAt = 0;
+            lastHostYtPos = 0;
+            lastHostYtSampleAt = 0;
+            lastHostYtState = -1;
+            ytAvailableRates = [];
             if (youtubePlayer) {
                 try { youtubePlayer.stopVideo(); } catch (e) {}
                 try { youtubePlayer.destroy(); } catch (e) {}
@@ -975,6 +987,11 @@
             hidePlayerLoading();
             try { youtubePlayer.setPlaybackRate(1); } catch (e) {}
             try {
+                ytAvailableRates = typeof youtubePlayer.getAvailablePlaybackRates === 'function'
+                    ? (youtubePlayer.getAvailablePlaybackRates() || [])
+                    : [];
+            } catch (e) { ytAvailableRates = []; }
+            try {
                 youtubePlayer.setOption('captions', 'track', { languageCode: 'id', kind: 'asr' });
                 youtubePlayer.setOption('captions', 'fontSize', 1);
                 subtitleEnabled = true;
@@ -1039,10 +1056,8 @@
             }
 
             if (!isHost) {
-                const prev = guestYtPrevState;
-                guestYtPrevState = state;
-
                 if (state === YT.PlayerState.PLAYING) {
+                    recordSeekCompletion();
                     if (ytAutoplayFallbackTimer) {
                         clearTimeout(ytAutoplayFallbackTimer);
                         ytAutoplayFallbackTimer = null;
@@ -1051,17 +1066,10 @@
                         const pendingTarget = ytPendingSeekAfterStart;
                         ytPendingSeekAfterStart = null;
                         const nowPos = youtubePlayer.getCurrentTime ? (youtubePlayer.getCurrentTime() || 0) : 0;
-                        if (Math.abs(nowPos - pendingTarget) > syncLib.SEEK_THRESHOLD_SEC) {
+                        if (Math.abs(nowPos - pendingTarget) > 0.85) {
                             isSyncing = true;
-                            lastSyncSeekAt = Date.now();
-                            postBufferAlignArmed = true;
-                            youtubePlayer.seekTo(pendingTarget, true);
+                            executePlayerSeek(pendingTarget, 'play');
                             setTimeout(() => { isSyncing = false; }, 220);
-                        }
-                    } else if (prev === YT.PlayerState.BUFFERING || postBufferAlignArmed) {
-                        postBufferAlignArmed = false;
-                        if (Date.now() - lastSyncSeekAt >= SYNC_SEEK_COOLDOWN_MS) {
-                            schedulePostBufferRealign();
                         }
                     }
                     try {
@@ -1096,11 +1104,15 @@
             if (state === YT.PlayerState.PLAYING) {
                 lastHostYtPos = youtubePlayer.getCurrentTime ? youtubePlayer.getCurrentTime() : lastHostYtPos;
                 lastHostYtSampleAt = Date.now();
+                lastHostYtState = state;
                 updateRoomStatus('play');
             } else if (state === YT.PlayerState.PAUSED) {
                 lastHostYtPos = youtubePlayer.getCurrentTime ? youtubePlayer.getCurrentTime() : lastHostYtPos;
                 lastHostYtSampleAt = Date.now();
+                lastHostYtState = state;
                 updateRoomStatus('pause');
+            } else {
+                lastHostYtState = state;
             }
             updateStatusDisplayYouTube(state);
         }
@@ -1129,10 +1141,16 @@
             const now = Date.now();
             const wallElapsedSec = (now - lastHostYtSampleAt) / 1000;
             const expectedPos = state === YT.PlayerState.PLAYING ? lastHostYtPos + wallElapsedSec : lastHostYtPos;
-            const jumpDelta = Math.abs(current - expectedPos);
 
-            // Detect manual YouTube timeline seek immediately and broadcast to guests
-            if (lastHostYtSampleAt > 0 && jumpDelta > (state === YT.PlayerState.PLAYING ? 0.75 : 0.25)) {
+            // Ignore brief buffer stalls or pause-settle jitter; only broadcast forceSeek on real timeline scrubs.
+            const isSteadyPlay = lastHostYtState === YT.PlayerState.PLAYING && state === YT.PlayerState.PLAYING;
+            const isSteadyPause = lastHostYtState === YT.PlayerState.PAUSED && state === YT.PlayerState.PAUSED;
+            const manualScrub = lastHostYtSampleAt > 0 && (
+                (isSteadyPlay && (current < lastHostYtPos - 0.8 || current > expectedPos + 1.8 || expectedPos - current > 2.8)) ||
+                (isSteadyPause && Math.abs(current - lastHostYtPos) > 1.0)
+            );
+
+            if (manualScrub) {
                 const statusStr = state === YT.PlayerState.PLAYING ? 'play' : 'pause';
                 hostTickSeq += 1;
                 if (syncChannel) {
@@ -1147,6 +1165,7 @@
 
             lastHostYtPos = current;
             lastHostYtSampleAt = now;
+            lastHostYtState = state;
         }
 
         // ===========================================
@@ -1154,14 +1173,11 @@
         // ===========================================
         function startClockCalibrationLoop() {
             if (isHost || !syncChannel) return;
-            // Rapid 3-ping burst to capture clean lowest-RTT sample right on join
-            [0, 260, 520].forEach(delay => {
-                setTimeout(() => {
-                    if (!isHost && !isLeavingPage && syncChannel) {
-                        window.watchParty.broadcastSyncPing(syncChannel, Date.now());
-                    }
-                }, delay);
-            });
+            setTimeout(() => {
+                if (!isHost && !isLeavingPage && syncChannel) {
+                    window.watchParty.broadcastSyncPing(syncChannel, Date.now());
+                }
+            }, 600);
             if (pingRefreshInterval) clearInterval(pingRefreshInterval);
             pingRefreshInterval = setInterval(() => {
                 if (!isHost && !isLeavingPage && syncChannel && playerType !== 'gdrive') {
@@ -1192,15 +1208,50 @@
             lastRttMs = Math.round(best.rttMs);
         }
 
-        function schedulePostBufferRealign() {
-            if (isHost || !lastHostSyncSnapshot || playerType === 'gdrive') return;
-            if (postBufferRetries >= 2) return;
-            postBufferRetries += 1;
-            setTimeout(() => {
-                if (!isHost && lastHostSyncSnapshot && lastHostSyncSnapshot.status === 'play') {
-                    applySyncedPlayback({ ...lastHostSyncSnapshot, forceSeek: false, source: 'post-buffer' });
+        function pickGentleYtRate(desiredRate) {
+            if ((!Array.isArray(ytAvailableRates) || ytAvailableRates.length === 0) && youtubePlayer && youtubePlayer.getAvailablePlaybackRates) {
+                try { ytAvailableRates = youtubePlayer.getAvailablePlaybackRates() || []; } catch (e) {}
+            }
+            if (!Array.isArray(ytAvailableRates) || ytAvailableRates.length === 0) return null;
+            const minAllowed = desiredRate < 1 ? 0.90 : 1.04;
+            const maxAllowed = desiredRate < 1 ? 0.96 : 1.10;
+            let best = null;
+            let bestDiff = Infinity;
+            for (const r of ytAvailableRates) {
+                if (r >= minAllowed && r <= maxAllowed) {
+                    const diff = Math.abs(r - desiredRate);
+                    if (diff < bestDiff) {
+                        bestDiff = diff;
+                        best = r;
+                    }
                 }
-            }, 300);
+            }
+            return best;
+        }
+
+        function recordSeekCompletion() {
+            if (!lastSeekStartedAt) return;
+            const elapsedSec = (Date.now() - lastSeekStartedAt) / 1000;
+            lastSeekStartedAt = 0;
+            if (elapsedSec >= 0.12 && elapsedSec <= 3.5) {
+                const blended = measuredSeekLeadSec * 0.6 + elapsedSec * 0.4;
+                measuredSeekLeadSec = Math.round(Math.max(0.25, Math.min(1.6, blended)) * 100) / 100;
+            }
+        }
+
+        function executePlayerSeek(targetTime, status) {
+            const nowMs = Date.now();
+            const lead = status === 'play' ? measuredSeekLeadSec : 0;
+            const safeTarget = Math.max(0, targetTime + lead);
+            lastSyncSeekAt = nowMs;
+            lastSeekStartedAt = status === 'play' ? nowMs : 0;
+            lastSeekTargetSec = safeTarget;
+            if (playerType === 'youtube' && youtubePlayer && youtubePlayer.seekTo) {
+                youtubePlayer.seekTo(safeTarget, true);
+            } else if (playerType === 'html5' && videoPlayer) {
+                if (videoPlayer.playbackRate !== 1.0) videoPlayer.playbackRate = 1.0;
+                videoPlayer.currentTime = safeTarget;
+            }
         }
 
         function applySyncedPlayback({ status, currentTime, sentAt, forceSeek = false, source = 'sync' }) {
@@ -1222,30 +1273,32 @@
                 clockOffsetMs,
             });
 
-            if (source === 'status' || source === 'sync_response') {
-                postBufferRetries = 0;
-            }
-
             isSyncing = true;
-            const canSeekNow = forceSeek || (nowMs - lastSyncSeekAt >= SYNC_SEEK_COOLDOWN_MS);
 
             if (playerType === 'youtube' && youtubePlayer && typeof youtubePlayer.getCurrentTime === 'function') {
                 const ytState = youtubePlayer.getPlayerState ? youtubePlayer.getPlayerState() : -1;
                 const localTime = youtubePlayer.getCurrentTime() || 0;
+                const effectiveForceSeek = Boolean(forceSeek) && (status === 'pause' || Math.abs(targetTime - localTime) > 0.65);
+                const canSeekNow = effectiveForceSeek || (nowMs - lastSyncSeekAt >= SYNC_SEEK_COOLDOWN_MS);
                 const decision = syncLib.decideSyncAction({
                     status,
                     targetTime,
                     localTime,
                     playerType: 'youtube',
-                    forceSeek,
+                    forceSeek: effectiveForceSeek,
                     youtubeSeekThresholdSec: YT_TICK_SEEK_THRESHOLD_SEC,
+                    youtubeRateDeadbandSec: YT_RATE_DEADBAND_SEC,
                 });
 
                 if (decision.action === 'seek_pause' || decision.action === 'pause') {
                     ytPendingSeekAfterStart = null;
+                    try {
+                        if (youtubePlayer.getPlaybackRate && youtubePlayer.getPlaybackRate() !== 1) {
+                            youtubePlayer.setPlaybackRate(1);
+                        }
+                    } catch (e) {}
                     if (decision.action === 'seek_pause' && ytState !== -1) {
-                        lastSyncSeekAt = nowMs;
-                        youtubePlayer.seekTo(decision.targetTime, true);
+                        executePlayerSeek(decision.targetTime, 'pause');
                     }
                     try { youtubePlayer.pauseVideo(); } catch (e) {}
                     updateStatusDisplay('pause');
@@ -1254,10 +1307,10 @@
                     const notStartedYet = (ytState === -1 || ytState === YT.PlayerState.CUED);
                     const isBuffering = (ytState === YT.PlayerState.BUFFERING);
 
-                    if (isBuffering && !forceSeek) {
+                    if (isBuffering && !effectiveForceSeek) {
                         updateSyncHealthUI('adjusting', 'Memuat video...');
                     } else if (notStartedYet) {
-                        ytPendingSeekAfterStart = decision.drift > YT_TICK_SEEK_THRESHOLD_SEC ? decision.targetTime : null;
+                        ytPendingSeekAfterStart = Math.abs(decision.drift) > 0.85 ? decision.targetTime : null;
                         if (IS_MOBILE_BROWSER || !guestHasInteracted) {
                             try {
                                 youtubePlayer.mute();
@@ -1269,11 +1322,31 @@
                         updateStatusDisplay('play');
                     } else {
                         if (decision.action === 'seek_play' && canSeekNow) {
-                            lastSyncSeekAt = nowMs;
-                            postBufferAlignArmed = true;
-                            youtubePlayer.seekTo(decision.targetTime, true);
+                            executePlayerSeek(decision.targetTime, 'play');
                             updateSyncHealthUI('adjusting', 'Menyelaraskan...');
+                        } else if (decision.action === 'rate_adjust') {
+                            const ytRate = pickGentleYtRate(decision.rate);
+                            if (ytRate !== null) {
+                                const curYtRate = youtubePlayer.getPlaybackRate ? youtubePlayer.getPlaybackRate() : 1;
+                                if (Math.abs(curYtRate - ytRate) >= 0.02 && nowMs - lastYtRateAt >= 1500) {
+                                    try {
+                                        youtubePlayer.setPlaybackRate(ytRate);
+                                        lastYtRateAt = nowMs;
+                                    } catch (e) {}
+                                }
+                                updateSyncHealthUI('adjusting', `Menyesuaikan (${ytRate}x)`);
+                            } else {
+                                updateSyncHealthUI('synced', formatSyncDetail(decision.drift));
+                            }
                         } else {
+                            if (youtubePlayer.getPlaybackRate && youtubePlayer.setPlaybackRate && nowMs - lastYtRateAt >= 1500) {
+                                try {
+                                    if (youtubePlayer.getPlaybackRate() !== 1) {
+                                        youtubePlayer.setPlaybackRate(1);
+                                        lastYtRateAt = nowMs;
+                                    }
+                                } catch (e) {}
+                            }
                             updateSyncHealthUI('synced', formatSyncDetail(decision.drift));
                         }
                         if (ytState !== YT.PlayerState.PLAYING) {
@@ -1289,12 +1362,14 @@
 
             if (playerType === 'html5' && videoPlayer && videoPlayer.readyState >= 1) {
                 const localTime = videoPlayer.currentTime || 0;
+                const effectiveForceSeek = Boolean(forceSeek) && (status === 'pause' || Math.abs(targetTime - localTime) > 0.65);
+                const canSeekNow = effectiveForceSeek || (nowMs - lastSyncSeekAt >= SYNC_SEEK_COOLDOWN_MS);
                 const decision = syncLib.decideSyncAction({
                     status,
                     targetTime,
                     localTime,
                     playerType: 'html5',
-                    forceSeek,
+                    forceSeek: effectiveForceSeek,
                     html5SeekThresholdSec: HTML5_TICK_SEEK_THRESHOLD_SEC,
                     html5RateDeadbandSec: HTML5_RATE_DEADBAND_SEC,
                 });
@@ -1303,8 +1378,7 @@
                     if (videoPlayer.playbackRate !== 1.0) videoPlayer.playbackRate = 1.0;
                     videoPlayer.pause();
                     if (decision.action === 'seek_pause') {
-                        lastSyncSeekAt = nowMs;
-                        videoPlayer.currentTime = decision.targetTime;
+                        executePlayerSeek(decision.targetTime, 'pause');
                     }
                     updateStatusDisplay('pause');
                     updateSyncHealthUI('synced', formatSyncDetail(decision.drift));
@@ -1314,10 +1388,7 @@
                         showAudioUnlockBar(true);
                     }
                     if (decision.action === 'seek_play' && canSeekNow) {
-                        lastSyncSeekAt = nowMs;
-                        postBufferAlignArmed = true;
-                        if (videoPlayer.playbackRate !== 1.0) videoPlayer.playbackRate = 1.0;
-                        videoPlayer.currentTime = decision.targetTime;
+                        executePlayerSeek(decision.targetTime, 'play');
                         updateSyncHealthUI('adjusting', 'Menyelaraskan...');
                     } else if (decision.action === 'rate_adjust') {
                         if (Math.abs(videoPlayer.playbackRate - decision.rate) >= 0.02 && nowMs - lastHtml5RateAt >= 1200) {
@@ -1355,7 +1426,7 @@
         function manualResync() {
             if (isHost || !syncChannel) return;
             clockSamples = [];
-            postBufferRetries = 0;
+            pendingManualResync = true;
             updateSyncHealthUI('adjusting', 'Mengukur jeda...');
             window.watchParty.broadcastSyncPing(syncChannel, Date.now());
             window.watchParty.broadcastSyncRequest(syncChannel);
@@ -1530,12 +1601,12 @@
                 }
 
                 setupVideoListenersOnce();
+                subscribeToSyncChannel();
                 await mountVideoSource(roomData.video_url, true);
 
                 subscribeToRoom();
                 subscribeToViewers();
                 subscribeToChatChannel();
-                subscribeToSyncChannel();
                 subscribeToBookmarksChannel();
                 subscribeToQueueChannel();
                 renderBookmarks();
@@ -1588,7 +1659,10 @@
                     ytPlayerCreatedInGesture = false;
                 } else {
                     showPlayerLoading(videoId, false);
-                    const startPos = roomData ? (roomData.current_time_sec || 0) : 0;
+                    const liveSnap = lastHostSyncSnapshot;
+                    const startPos = liveSnap
+                        ? syncLib.computeTargetPlaybackTime({ ...liveSnap, nowMs: Date.now(), clockOffsetMs })
+                        : (roomData ? (roomData.current_time_sec || 0) : 0);
                     const shouldAuto = !isInitialLoad || Boolean(roomData && roomData.status === 'play');
                     const waitApi = setInterval(() => {
                         if (youtubeApiReady || window.__ytApiLoaded || (window.YT && window.YT.Player)) {
@@ -1699,10 +1773,24 @@
             }
         }
 
+        function shouldDropOutOfOrderSync(data) {
+            if (!data || !data.sessionId || !data.seq) return false;
+            if (data.sessionId === lastSyncSessionId && data.seq <= lastSyncSeq) return true;
+            lastSyncSessionId = data.sessionId;
+            lastSyncSeq = data.seq;
+            return false;
+        }
+
         function subscribeToSyncChannel() {
             syncChannel = window.watchParty.subscribeToSync(roomId, {
+                onSubscribed: () => {
+                    if (!isHost && !isLeavingPage && syncChannel && playerType !== 'gdrive') {
+                        window.watchParty.broadcastSyncPing(syncChannel, Date.now());
+                        window.watchParty.broadcastSyncRequest(syncChannel);
+                    }
+                },
                 onStatus: (data) => {
-                    if (!isHost) {
+                    if (!isHost && !shouldDropOutOfOrderSync(data)) {
                         applySyncedPlayback({
                             status: data.status,
                             currentTime: data.currentTime,
@@ -1713,7 +1801,7 @@
                     }
                 },
                 onSyncTick: (data) => {
-                    if (!isHost) {
+                    if (!isHost && !shouldDropOutOfOrderSync(data)) {
                         applySyncedPlayback({
                             status: data.status,
                             currentTime: data.currentTime,
@@ -1738,15 +1826,6 @@
                     if (isHost || !data) return;
                     if (data.targetUserId && data.targetUserId !== currentUserId) return;
                     recordClockSample(data.clientTime, data.hostTime);
-                    if (data.status) {
-                        applySyncedPlayback({
-                            status: data.status,
-                            currentTime: data.currentTime,
-                            sentAt: data.sentAt || data.hostTime,
-                            forceSeek: false,
-                            source: 'pong',
-                        });
-                    }
                 },
                 onSyncRequest: (data) => {
                     if (isHost) {
@@ -1756,6 +1835,7 @@
                             clientTime: data ? (data.clientTime || data.timestamp) : null,
                             status: snap.status,
                             currentTime: snap.currentTime,
+                            seq: hostTickSeq,
                         });
                     }
                 },
@@ -1765,11 +1845,19 @@
                         if (data.clientTime && data.hostTime) {
                             recordClockSample(data.clientTime, data.hostTime);
                         }
+                        if (data.sessionId && data.seq) {
+                            if (data.sessionId !== lastSyncSessionId || data.seq > lastSyncSeq) {
+                                lastSyncSessionId = data.sessionId;
+                                lastSyncSeq = data.seq;
+                            }
+                        }
+                        const useForceSeek = pendingManualResync;
+                        pendingManualResync = false;
                         applySyncedPlayback({
                             status: data.status,
                             currentTime: data.currentTime,
                             sentAt: data.sentAt || data.timestamp,
-                            forceSeek: true,
+                            forceSeek: useForceSeek,
                             source: 'sync_response',
                         });
                     }
@@ -2423,17 +2511,17 @@
             videoPlayer.addEventListener('seeked', () => {
                 if (isLeavingPage) return;
                 if (!isHost) {
-                    if (isSyncing) return;
+                    if (isSyncing || Date.now() - lastSyncSeekAt < 4000) return;
                     const snap = lastHostSyncSnapshot || {
                         status: roomData ? roomData.status : 'pause',
                         currentTime: roomData ? roomData.current_time_sec : 0,
                         sentAt: Date.now(),
                     };
                     const expected = syncLib.computeTargetPlaybackTime({ ...snap, nowMs: Date.now(), clockOffsetMs });
-                    if (Math.abs((videoPlayer.currentTime || 0) - expected) > 0.75) {
+                    if (Math.abs((videoPlayer.currentTime || 0) - expected) > HTML5_TICK_SEEK_THRESHOLD_SEC) {
                         isSyncing = true;
-                        videoPlayer.currentTime = expected;
-                        setTimeout(() => { isSyncing = false; }, 100);
+                        executePlayerSeek(expected, snap.status || 'pause');
+                        setTimeout(() => { isSyncing = false; }, 140);
                     }
                     return;
                 }
@@ -2449,10 +2537,7 @@
             });
 
             videoPlayer.addEventListener('playing', () => {
-                if (!isHost && postBufferAlignArmed) {
-                    postBufferAlignArmed = false;
-                    schedulePostBufferRealign();
-                }
+                if (!isHost) recordSeekCompletion();
             });
 
             videoPlayer.addEventListener('timeupdate', () => {
@@ -3208,7 +3293,6 @@
 
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden && !isHost && syncChannel && playerType !== 'gdrive') {
-                postBufferRetries = 0;
                 window.watchParty.broadcastSyncRequest(syncChannel);
             }
         });

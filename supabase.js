@@ -653,6 +653,9 @@ async function unsubscribeFromChat(channel) {
 /**
  * Subscribe to sync channel for instant play/pause and reactions
  */
+// Per-tab sync session ID so guests reset seq tracking on host reload/transfer
+const SYNC_SESSION_ID = Math.random().toString(36).slice(2, 10);
+
 function subscribeToSync(roomId, callbacks) {
   const channel = supabaseClient.channel(`sync:${roomId}`, {
     config: {
@@ -726,7 +729,11 @@ function subscribeToSync(roomId, callbacks) {
         callbacks.onSyncPong(payload.payload);
       }
     })
-    .subscribe();
+    .subscribe((status) => {
+      if (status === "SUBSCRIBED" && callbacks && callbacks.onSubscribed) {
+        callbacks.onSubscribed();
+      }
+    });
 
   return channel;
 }
@@ -747,6 +754,7 @@ async function broadcastStatus(channel, status, currentTime, meta = {}) {
         sentAt: now,
         forceSeek: Boolean(meta.forceSeek),
         seq: meta.seq || 0,
+        sessionId: SYNC_SESSION_ID,
       },
     });
   }
@@ -767,6 +775,7 @@ async function broadcastSyncTick(channel, status, currentTime, seq = 0) {
         timestamp: now,
         sentAt: now,
         seq: seq,
+        sessionId: SYNC_SESSION_ID,
       },
     });
   }
@@ -918,6 +927,8 @@ async function broadcastSyncResponse(channel, state) {
         sentAt: now,
         hostTime: now,
         clientTime: state.clientTime || null,
+        seq: state.seq || 0,
+        sessionId: SYNC_SESSION_ID,
       },
     });
   }

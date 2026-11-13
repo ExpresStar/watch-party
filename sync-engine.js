@@ -143,6 +143,7 @@
     playerType = "html5",
     forceSeek = false,
     youtubeSeekThresholdSec = SEEK_THRESHOLD_SEC,
+    youtubeRateDeadbandSec = 0,
     html5SeekThresholdSec = 0.70,
     html5RateDeadbandSec = 0.08,
   }) {
@@ -162,7 +163,8 @@
       return { action: "seek_play", targetTime: safeTarget, drift, rate: 1.0 };
     }
 
-    if (playerType === "html5" && Math.abs(drift) > html5RateDeadbandSec) {
+    const rateDeadband = playerType === "youtube" ? youtubeRateDeadbandSec : html5RateDeadbandSec;
+    if (rateDeadband > 0 && Math.abs(drift) > rateDeadband) {
       // Gently speed up or slow down playbackRate instead of stutter-seeking.
       const nudge = 1 + drift * 0.14;
       const clamped = Math.max(0.92, Math.min(1.08, nudge));

@@ -120,6 +120,49 @@ assert.equal(
   }).action,
   "seek_play",
 );
+// YouTube gentle rate_adjust avoids seek-buffer loops inside wide tick seek band
+assert.equal(
+  sync.decideSyncAction({
+    status: "play",
+    targetTime: 100.25,
+    localTime: 100.0,
+    playerType: "youtube",
+    youtubeSeekThresholdSec: 1.85,
+    youtubeRateDeadbandSec: 0.35,
+  }).action,
+  "aligned",
+);
+const ytCatchUp = sync.decideSyncAction({
+  status: "play",
+  targetTime: 100.90,
+  localTime: 100.0,
+  playerType: "youtube",
+  youtubeSeekThresholdSec: 1.85,
+  youtubeRateDeadbandSec: 0.35,
+});
+assert.equal(ytCatchUp.action, "rate_adjust");
+assert.ok(ytCatchUp.rate > 1.0 && ytCatchUp.rate <= 1.08);
+const ytSlowDown = sync.decideSyncAction({
+  status: "play",
+  targetTime: 99.10,
+  localTime: 100.0,
+  playerType: "youtube",
+  youtubeSeekThresholdSec: 1.85,
+  youtubeRateDeadbandSec: 0.35,
+});
+assert.equal(ytSlowDown.action, "rate_adjust");
+assert.ok(ytSlowDown.rate < 1.0 && ytSlowDown.rate >= 0.92);
+assert.equal(
+  sync.decideSyncAction({
+    status: "play",
+    targetTime: 102.20,
+    localTime: 100.0,
+    playerType: "youtube",
+    youtubeSeekThresholdSec: 1.85,
+    youtubeRateDeadbandSec: 0.35,
+  }).action,
+  "seek_play",
+);
 
 // 8. Static anti-slop guard: zero em dashes across deliverables
 for (const file of ["index.html", "room.html", "style.css", "supabase.js", "sync-engine.js", "voice.js"]) {
