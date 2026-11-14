@@ -252,21 +252,21 @@
                     </div>
 
                     <div class="floating-reactions floating-reactions-fullscreen" id="floatingReactionsFullscreen"></div>
+                </div>
 
-                    <!-- Stage Control Overlay Buttons -->
-                    <div class="stage-controls">
-                        <button type="button" class="stage-ctrl-btn" id="customFullscreenBtn" onclick="toggleCustomFullscreen()" title="Layar penuh dengan chat">
-                            ⛶
-                        </button>
-                        <button type="button" class="stage-ctrl-btn voice-chat-btn" id="voiceChatBtn" onclick="handleVoiceBtnClick()" title="Voice Chat: Mati">
-                            <span class="voice-off">Mic Off</span>
-                            <span class="voice-on">Mic On</span>
-                            <span class="voice-muted">Muted</span>
-                        </button>
-                        <button type="button" class="stage-ctrl-btn active" id="subtitleToggleBtn" onclick="toggleSubtitles()" title="Subtitle: ON">
-                            <span id="subtitleIcon">CC</span>
-                        </button>
-                    </div>
+                <!-- Stage Control Buttons (placed below player so YouTube gear/settings stay clickable) -->
+                <div class="stage-controls">
+                    <button type="button" class="stage-ctrl-btn" id="customFullscreenBtn" onclick="toggleCustomFullscreen()" title="Layar penuh dengan chat">
+                        ⛶
+                    </button>
+                    <button type="button" class="stage-ctrl-btn voice-chat-btn" id="voiceChatBtn" onclick="handleVoiceBtnClick()" title="Voice Chat: Mati">
+                        <span class="voice-off">Mic Off</span>
+                        <span class="voice-on">Mic On</span>
+                        <span class="voice-muted">Muted</span>
+                    </button>
+                    <button type="button" class="stage-ctrl-btn active" id="subtitleToggleBtn" onclick="toggleSubtitles()" title="Subtitle: ON">
+                        <span id="subtitleIcon">CC</span>
+                    </button>
                 </div>
 
                 <!-- Source Specific Notice (Local File Picker / GDrive Honest Mode) -->
