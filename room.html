@@ -553,6 +553,7 @@
         let subtitleEnabled = true;
         let activeHlsPlayer = null;
         let hlsLibraryPromise = null;
+        let hlsMountToken = 0;
         let activeSubtitleBlobUrl = null;
         let isIOSFakeFullscreen = false;
         let isTyping = false;
@@ -825,7 +826,10 @@
                 script.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js';
                 script.async = true;
                 script.onload = () => resolve(window.Hls);
-                script.onerror = () => reject(new Error('Failed to load hls.js'));
+                script.onerror = () => {
+                    hlsLibraryPromise = null;
+                    reject(new Error('Failed to load hls.js'));
+                };
                 document.head.appendChild(script);
             });
             return hlsLibraryPromise;
@@ -878,6 +882,7 @@
             lastHostYtSampleAt = 0;
             lastHostYtState = -1;
             ytAvailableRates = [];
+            hlsMountToken += 1;
             if (activeHlsPlayer) {
                 try { activeHlsPlayer.destroy(); } catch (e) {}
                 activeHlsPlayer = null;
@@ -1972,11 +1977,14 @@
             }
 
             if (syncLib.isHlsUrl(videoUrl)) {
-                if (videoPlayer.canPlayType && videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+                const canNativeHls = Boolean(videoPlayer.canPlayType && videoPlayer.canPlayType('application/vnd.apple.mpegurl'));
+                if (IS_IOS_DEVICE && canNativeHls) {
                     videoPlayer.src = videoUrl;
                 } else {
+                    const mountToken = hlsMountToken;
                     try {
                         const Hls = await loadHlsJsLibrary();
+                        if (mountToken !== hlsMountToken) return;
                         if (Hls && Hls.isSupported()) {
                             activeHlsPlayer = new Hls();
                             activeHlsPlayer.on(Hls.Events.ERROR, (_evt, data) => {
@@ -1986,11 +1994,18 @@
                             });
                             activeHlsPlayer.loadSource(videoUrl);
                             activeHlsPlayer.attachMedia(videoPlayer);
-                        } else {
+                        } else if (canNativeHls) {
                             videoPlayer.src = videoUrl;
+                        } else {
+                            showStatus('Browser ini belum mendukung pemutaran stream HLS (.m3u8).', 'error');
                         }
                     } catch (err) {
-                        showStatus('Gagal memuat pemutar HLS (.m3u8). Periksa koneksi internetmu.', 'error');
+                        if (mountToken !== hlsMountToken) return;
+                        if (canNativeHls) {
+                            videoPlayer.src = videoUrl;
+                        } else {
+                            showStatus('Gagal memuat pemutar HLS (.m3u8). Periksa koneksi internetmu.', 'error');
+                        }
                     }
                 }
             } else {
