@@ -101,19 +101,28 @@
         </div>
     </div>
 
-    <!-- Knock Waiting Modal (Guest) -->
+    <!-- Knock Waiting / PIN Modal (Guest) -->
     <div class="modal-overlay" id="knockModal" role="dialog" aria-modal="true" aria-labelledby="knockModalTitle">
         <div class="modal">
             <div class="modal-header">
                 <h3 id="knockModalTitle">Meminta Izin Masuk</h3>
             </div>
             <div class="modal-body" style="text-align: center;">
-                <div class="knock-spinner"></div>
-                <p>Menunggu <strong id="knockHostName">host</strong> menyetujui permintaan masuk.</p>
+                <div class="knock-spinner" id="knockSpinner"></div>
+                <p id="knockStatusDesc">Menunggu <strong id="knockHostName">host</strong> menyetujui permintaan masuk.</p>
+                <div class="knock-pin-box" id="knockPinBox" style="display: none;">
+                    <label class="field-label" for="knockPinInput">PIN Room</label>
+                    <div class="knock-pin-row">
+                        <input type="password" class="field-input" id="knockPinInput" placeholder="Masukkan PIN 4-6 digit" maxlength="6" inputmode="numeric" autocomplete="off">
+                        <button type="button" class="btn btn-primary btn-sm" id="knockPinSubmitBtn" onclick="submitKnockPin()">Masuk</button>
+                    </div>
+                    <div class="knock-pin-error" id="knockPinError" style="display: none;"></div>
+                </div>
                 <p id="knockTimeoutHint" style="font-size: 0.82rem; display: none;">Host belum merespons. Kamu dapat mengirim ulang permintaan.</p>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" onclick="cancelKnock()">Batal</button>
+                <button type="button" class="btn btn-secondary" id="knockAskApprovalBtn" onclick="requestManualApproval()" style="display: none;">Minta Izin Host</button>
                 <button type="button" class="btn btn-primary" id="knockRetryBtn" onclick="retryKnock()" style="display: none;">Kirim Ulang</button>
             </div>
         </div>
@@ -143,7 +152,7 @@
             </div>
             <div class="modal-body" style="text-align: center;">
                 <div class="knock-user-avatar" id="knockUserAvatar">?</div>
-                <p><strong id="knockUserName">User</strong> meminta izin bergabung kembali.</p>
+                <p id="knockReceivedPrompt"><strong id="knockUserName">User</strong> meminta izin bergabung kembali.</p>
                 <div class="knock-note" id="knockNote">Peserta ini sebelumnya pernah dikeluarkan dari room.</div>
             </div>
             <div class="modal-footer">
@@ -167,6 +176,19 @@
         <div class="viewers-panel-header">
             <span>Peserta (<span id="viewersPanelCount">0</span>)</span>
             <button type="button" class="modal-close" onclick="closeViewersPanel()" aria-label="Tutup daftar peserta">✕</button>
+        </div>
+        <div class="viewers-lock-bar" id="viewersLockBar" style="display: none;">
+            <div class="viewers-lock-row">
+                <button type="button" class="btn btn-secondary btn-sm" id="roomLockToggleBtn" onclick="toggleRoomLock()" style="flex: 1;">
+                    Kunci Room: Off
+                </button>
+            </div>
+            <div class="viewers-lock-row">
+                <input type="password" class="field-input viewers-pin-input" id="roomLockPinInput" placeholder="PIN 4-6 digit" maxlength="6" inputmode="numeric" autocomplete="off">
+                <button type="button" class="btn btn-primary btn-sm" id="roomLockPinSaveBtn" onclick="saveRoomLockPin()">Simpan PIN</button>
+                <button type="button" class="btn btn-ghost btn-sm" id="roomLockPinClearBtn" onclick="clearRoomLockPin()" style="display: none;">Hapus</button>
+            </div>
+            <span class="viewers-lock-note">Kunci room dan PIN berlaku selama host online di room.</span>
         </div>
         <div class="viewers-panel-search">
             <input type="text" id="viewersSearchInput" placeholder="Cari peserta..." autocomplete="off" oninput="filterViewersPanel()">
@@ -242,6 +264,11 @@
                         <div id="fullscreenChatMessages"></div>
                     </div>
 
+                    <div class="fullscreen-chat-compose" id="fullscreenChatCompose">
+                        <input type="text" id="fullscreenChatInput" placeholder="Ketik pesan di layar penuh..." maxlength="500" autocomplete="off">
+                        <button type="button" class="btn btn-primary btn-sm" id="fullscreenChatSendBtn" onclick="sendFullscreenChatMessage()">Kirim</button>
+                    </div>
+
                     <div class="reaction-bar-fullscreen" id="reactionBarFullscreen">
                         <button type="button" class="reaction-btn" onclick="sendReaction('😂')" aria-label="Tertawa">😂</button>
                         <button type="button" class="reaction-btn" onclick="sendReaction('❤️')" aria-label="Suka">❤️</button>
@@ -267,6 +294,10 @@
                     <button type="button" class="stage-ctrl-btn active" id="subtitleToggleBtn" onclick="toggleSubtitles()" title="Subtitle: ON">
                         <span id="subtitleIcon">CC</span>
                     </button>
+                    <label class="stage-ctrl-btn" id="subtitleUploadBtn" for="html5SubtitleInput" title="Pasang file subtitle (.srt atau .vtt)" style="display: none; cursor: pointer;">
+                        + Sub
+                    </label>
+                    <input type="file" id="html5SubtitleInput" accept=".srt,.vtt,text/vtt" style="display: none;">
                 </div>
 
                 <!-- Source Specific Notice (Local File Picker / GDrive Honest Mode) -->
@@ -353,7 +384,7 @@
                         <div id="hostSourceControls">
                             <label class="field-label" for="ytSearchInput">Ganti tautan video atau cari judul di YouTube</label>
                             <div class="source-input-wrap">
-                                <input type="text" class="field-input" id="ytSearchInput" placeholder="Paste URL YouTube / .mp4, atau ketik judul..." autocomplete="off">
+                                <input type="text" class="field-input" id="ytSearchInput" placeholder="Paste URL YouTube, .mp4, atau .m3u8, atau ketik judul..." autocomplete="off">
                                 <button type="button" class="input-clear-btn" id="ytSearchClearBtn" onclick="clearYtSearch()" style="display: none;" aria-label="Hapus">✕</button>
                             </div>
                             <div id="ytSearchSuggestions" class="yt-search-suggestions" style="display: none;"></div>
@@ -520,6 +551,9 @@
         let activeChatNotification = null;
         let lastVideoId = null;
         let subtitleEnabled = true;
+        let activeHlsPlayer = null;
+        let hlsLibraryPromise = null;
+        let activeSubtitleBlobUrl = null;
         let isIOSFakeFullscreen = false;
         let isTyping = false;
         let typingTimeout = null;
@@ -530,6 +564,11 @@
         let pendingKnockData = null;
         let knockTimeout = null;
         let tempSyncChannel = null;
+        let knockModeActive = false;
+        let currentKnockReason = 'kick';
+        let guestAccessApproved = false;
+        let roomLoadedOnce = false;
+        let roomLockConfig = { locked: false, pin: '' };
         let expiryTimerInterval = null;
         let ytSearchDebounce = null;
         let ytJsonpCounter = 0;
@@ -635,6 +674,95 @@
             if (isHost) {
                 updateSyncHealthUI('synced', 'Host · Live');
             }
+            updateRoomLockUI();
+        }
+
+        function loadHostRoomLockConfig() {
+            roomLockConfig = { locked: false, pin: '' };
+            if (!roomId || !isHost || isTempHost) return;
+            try {
+                const raw = localStorage.getItem(`watchparty_room_lock_${roomId}`);
+                if (!raw) return;
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object') {
+                    const pin = /^\d{4,6}$/.test(String(parsed.pin || '')) ? String(parsed.pin) : '';
+                    roomLockConfig = { locked: Boolean(parsed.locked || pin), pin };
+                }
+            } catch (e) {}
+        }
+
+        function persistHostRoomLockConfig() {
+            if (!roomId || !isHost || isTempHost) return;
+            try {
+                if (!roomLockConfig.locked && !roomLockConfig.pin) {
+                    localStorage.removeItem(`watchparty_room_lock_${roomId}`);
+                } else {
+                    localStorage.setItem(`watchparty_room_lock_${roomId}`, JSON.stringify(roomLockConfig));
+                }
+            } catch (e) {}
+            if (presenceChannel) {
+                window.watchParty.updatePresence(presenceChannel, {
+                    room_locked: Boolean(roomLockConfig.locked),
+                    room_pin_required: Boolean(roomLockConfig.pin),
+                });
+            }
+            updateRoomLockUI();
+        }
+
+        function updateRoomLockUI() {
+            const bar = document.getElementById('viewersLockBar');
+            const toggleBtn = document.getElementById('roomLockToggleBtn');
+            const pinInput = document.getElementById('roomLockPinInput');
+            const clearBtn = document.getElementById('roomLockPinClearBtn');
+            if (!bar) return;
+            const canManageLock = isHost && !isTempHost;
+            bar.style.display = canManageLock ? 'flex' : 'none';
+            if (!canManageLock) return;
+            if (toggleBtn) {
+                toggleBtn.textContent = roomLockConfig.locked
+                    ? (roomLockConfig.pin ? 'Kunci Room: Aktif (PIN)' : 'Kunci Room: Aktif (Izin)')
+                    : 'Kunci Room: Off';
+                toggleBtn.classList.toggle('btn-primary', roomLockConfig.locked);
+                toggleBtn.classList.toggle('btn-secondary', !roomLockConfig.locked);
+            }
+            if (pinInput && document.activeElement !== pinInput) {
+                pinInput.value = roomLockConfig.pin || '';
+            }
+            if (clearBtn) {
+                clearBtn.style.display = roomLockConfig.pin ? 'inline-flex' : 'none';
+            }
+        }
+
+        function toggleRoomLock() {
+            if (!isHost || isTempHost) return;
+            roomLockConfig.locked = !roomLockConfig.locked;
+            persistHostRoomLockConfig();
+            showSyncIndicator(roomLockConfig.locked
+                ? 'Room dikunci. Tamu baru perlu izin atau PIN untuk masuk.'
+                : 'Kunci room dibuka.');
+        }
+
+        function saveRoomLockPin() {
+            if (!isHost || isTempHost) return;
+            const input = document.getElementById('roomLockPinInput');
+            const pin = (input ? input.value : '').trim();
+            if (!/^\d{4,6}$/.test(pin)) {
+                showSyncIndicator('PIN harus 4 sampai 6 digit angka.');
+                if (input) input.focus();
+                return;
+            }
+            roomLockConfig = { locked: true, pin };
+            persistHostRoomLockConfig();
+            showSyncIndicator('PIN room disimpan dan kunci diaktifkan.');
+        }
+
+        function clearRoomLockPin() {
+            if (!isHost || isTempHost) return;
+            roomLockConfig.pin = '';
+            const input = document.getElementById('roomLockPinInput');
+            if (input) input.value = '';
+            persistHostRoomLockConfig();
+            showSyncIndicator(roomLockConfig.locked ? 'PIN dihapus. Tamu tetap perlu izin masuk.' : 'PIN room dihapus.');
         }
 
         function getPlaybackSnapshot() {
@@ -678,6 +806,63 @@
             }
         }
 
+        function clearHtml5SubtitleTracks() {
+            if (videoPlayer) {
+                const tracks = videoPlayer.querySelectorAll('track');
+                tracks.forEach((tr) => tr.remove());
+            }
+            if (activeSubtitleBlobUrl) {
+                try { URL.revokeObjectURL(activeSubtitleBlobUrl); } catch (e) {}
+                activeSubtitleBlobUrl = null;
+            }
+        }
+
+        function loadHlsJsLibrary() {
+            if (window.Hls) return Promise.resolve(window.Hls);
+            if (hlsLibraryPromise) return hlsLibraryPromise;
+            hlsLibraryPromise = new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js';
+                script.async = true;
+                script.onload = () => resolve(window.Hls);
+                script.onerror = () => reject(new Error('Failed to load hls.js'));
+                document.head.appendChild(script);
+            });
+            return hlsLibraryPromise;
+        }
+
+        function attachHtml5SubtitleFile(file) {
+            if (!file) return;
+            if (file.size > 2 * 1024 * 1024) {
+                showSyncIndicator('File subtitle terlalu besar (maksimal 2 MB).');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => {
+                const rawText = String(reader.result || '');
+                const vttText = syncLib.srtToVtt(rawText);
+                clearHtml5SubtitleTracks();
+                activeSubtitleBlobUrl = URL.createObjectURL(new Blob([vttText], { type: 'text/vtt' }));
+                const track = document.createElement('track');
+                track.kind = 'subtitles';
+                track.srclang = 'id';
+                track.label = file.name || 'Subtitle';
+                track.src = activeSubtitleBlobUrl;
+                track.default = true;
+                videoPlayer.appendChild(track);
+                subtitleEnabled = true;
+                if (videoPlayer.textTracks && videoPlayer.textTracks.length > 0) {
+                    videoPlayer.textTracks[0].mode = 'showing';
+                }
+                updateSubtitleBtn();
+                showSyncIndicator(`Subtitle "${file.name}" aktif.`);
+            };
+            reader.onerror = () => {
+                showSyncIndicator('Gagal membaca file subtitle.');
+            };
+            reader.readAsText(file);
+        }
+
         function resetAllPlayers() {
             if (youtubeTimeInterval) {
                 clearInterval(youtubeTimeInterval);
@@ -693,6 +878,10 @@
             lastHostYtSampleAt = 0;
             lastHostYtState = -1;
             ytAvailableRates = [];
+            if (activeHlsPlayer) {
+                try { activeHlsPlayer.destroy(); } catch (e) {}
+                activeHlsPlayer = null;
+            }
             if (youtubePlayer) {
                 try { youtubePlayer.stopVideo(); } catch (e) {}
                 try { youtubePlayer.destroy(); } catch (e) {}
@@ -701,6 +890,7 @@
             youtubePlayerStage.innerHTML = '<div id="youtubePlayer"></div>';
             youtubePlayerStage.style.display = 'none';
 
+            clearHtml5SubtitleTracks();
             videoPlayer.pause();
             videoPlayer.playbackRate = 1.0;
             videoPlayer.removeAttribute('src');
@@ -808,17 +998,29 @@
             this.value = '';
         });
 
+        document.getElementById('html5SubtitleInput').addEventListener('change', function () {
+            const file = this.files && this.files[0];
+            if (file) attachHtml5SubtitleFile(file);
+            this.value = '';
+        });
+
         // ===========================================
         // YOUTUBE PLAYER & TITLE FETCH
         // ===========================================
         async function fetchVideoTitle(videoUrl) {
             const titleEl = document.getElementById('videoTitleText');
+            const recordRecent = (title) => {
+                if (roomId && window.watchParty && typeof window.watchParty.saveRecentRoomEntry === 'function') {
+                    window.watchParty.saveRecentRoomEntry({ id: roomId, title, role: isHost ? 'Host' : 'Guest' });
+                }
+            };
             if (!videoUrl) {
                 titleEl.textContent = 'Tanpa sumber video';
                 return;
             }
             if (syncLib.isLocalVideoUrl(videoUrl)) {
                 titleEl.textContent = 'File Lokal: ' + syncLib.getLocalVideoName(videoUrl);
+                recordRecent(titleEl.textContent);
                 return;
             }
             if (syncLib.isYouTubeUrl(videoUrl)) {
@@ -830,19 +1032,23 @@
                             const data = await res.json();
                             if (data && data.title) {
                                 titleEl.textContent = data.title;
+                                recordRecent(data.title);
                                 return;
                             }
                         }
                     } catch (e) {}
                 }
                 titleEl.textContent = 'Video YouTube';
+                recordRecent(titleEl.textContent);
                 return;
             }
             if (syncLib.isGoogleDriveUrl(videoUrl)) {
                 titleEl.textContent = 'Video Google Drive';
+                recordRecent(titleEl.textContent);
                 return;
             }
             titleEl.textContent = window.watchParty.extractVideoTitle(videoUrl) || 'Video Stream';
+            recordRecent(titleEl.textContent);
         }
 
         function handleYouTubeApiReady() {
@@ -1624,10 +1830,19 @@
                 }
 
                 isHost = window.watchParty.checkIsHost(roomData);
+                roomLoadedOnce = true;
                 if (isHost) {
                     isSyncing = true;
                     awaitingReclaimSync = !isTempHost;
+                    loadHostRoomLockConfig();
+                    guestAccessApproved = true;
                     startExpiryTimer();
+                } else {
+                    try {
+                        guestAccessApproved = sessionStorage.getItem(`watchparty_unlocked_${roomId}`) === '1';
+                    } catch (e) {
+                        guestAccessApproved = false;
+                    }
                 }
 
                 setupVideoListenersOnce();
@@ -1730,9 +1945,6 @@
                 return;
             }
 
-            videoPlayer.src = videoUrl;
-            updateStatusDisplay(roomData ? roomData.status : 'pause');
-
             if (!isHost && isInitialLoad) {
                 videoPlayer.muted = true;
                 showAudioUnlockBar(true);
@@ -1745,16 +1957,46 @@
                     if (syncChannel) window.watchParty.broadcastSyncRequest(syncChannel);
                 });
             } else if (isHost) {
-                if (roomData && roomData.current_time_sec > 0) {
-                    videoPlayer.currentTime = roomData.current_time_sec;
-                }
-                if (!isInitialLoad) {
-                    videoPlayer.play().catch(() => {});
-                }
-                if (!awaitingReclaimSync) {
-                    setTimeout(() => { if (!awaitingReclaimSync) isSyncing = false; }, 350);
-                }
+                videoPlayer.addEventListener('loadedmetadata', function onHostMeta() {
+                    videoPlayer.removeEventListener('loadedmetadata', onHostMeta);
+                    if (roomData && roomData.current_time_sec > 0) {
+                        videoPlayer.currentTime = roomData.current_time_sec;
+                    }
+                    if (!isInitialLoad) {
+                        videoPlayer.play().catch(() => {});
+                    }
+                    if (!awaitingReclaimSync) {
+                        setTimeout(() => { if (!awaitingReclaimSync) isSyncing = false; }, 350);
+                    }
+                });
             }
+
+            if (syncLib.isHlsUrl(videoUrl)) {
+                if (videoPlayer.canPlayType && videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+                    videoPlayer.src = videoUrl;
+                } else {
+                    try {
+                        const Hls = await loadHlsJsLibrary();
+                        if (Hls && Hls.isSupported()) {
+                            activeHlsPlayer = new Hls();
+                            activeHlsPlayer.on(Hls.Events.ERROR, (_evt, data) => {
+                                if (data && data.fatal) {
+                                    showStatus('Stream HLS (.m3u8) gagal dimuat. Pastikan tautan aktif dan mengizinkan CORS.', 'error');
+                                }
+                            });
+                            activeHlsPlayer.loadSource(videoUrl);
+                            activeHlsPlayer.attachMedia(videoPlayer);
+                        } else {
+                            videoPlayer.src = videoUrl;
+                        }
+                    } catch (err) {
+                        showStatus('Gagal memuat pemutar HLS (.m3u8). Periksa koneksi internetmu.', 'error');
+                    }
+                }
+            } else {
+                videoPlayer.src = videoUrl;
+            }
+            updateStatusDisplay(roomData ? roomData.status : 'pause');
         }
 
         function scheduleFinalizeHostReclaim(delayMs) {
@@ -1782,6 +2024,13 @@
             }
             if (syncChannel) {
                 window.watchParty.broadcastHostReclaim(syncChannel, currentUserId);
+            }
+            if (presenceChannel && !isTempHost) {
+                window.watchParty.updatePresence(presenceChannel, {
+                    is_host: true,
+                    room_locked: Boolean(roomLockConfig.locked),
+                    room_pin_required: Boolean(roomLockConfig.pin),
+                });
             }
             updateRoleUI();
             showSyncIndicator('Host kembali. Kendali pemutar dikembalikan.');
@@ -1936,6 +2185,7 @@
                 onTyping: (data) => handleTypingEvent(data),
                 onKick: (data) => handleKick(data),
                 onKnock: (data) => handleKnockRequest(data),
+                onKnockResponse: (data) => handleKnockResponse(data),
                 onHostTransfer: (data) => {
                     if (!data || !data.new_host_id) return;
                     if (data.new_host_id === currentUserId) {
@@ -1965,6 +2215,10 @@
                 isHost,
                 currentUserName,
                 {
+                    initialPayload: {
+                        room_locked: (isHost && !isTempHost) ? Boolean(roomLockConfig.locked) : false,
+                        room_pin_required: (isHost && !isTempHost) ? Boolean(roomLockConfig.pin) : false,
+                    },
                     onSync: (state) => {
                         if (!initialPresenceSynced && state && Object.keys(state).length > 0) {
                             Object.entries(state).forEach(([uid, list]) => {
@@ -2011,6 +2265,7 @@
                             }, 4500);
                         }
 
+                        checkRoomLockGate(state);
                         updateViewersDisplay(state);
                     },
                     onJoin: (newPresences) => {
@@ -2196,7 +2451,13 @@
                 } catch (e) {}
             }
 
-            if (presenceChannel) window.watchParty.updatePresence(presenceChannel, { is_host: true });
+            if (presenceChannel) {
+                window.watchParty.updatePresence(presenceChannel, {
+                    is_host: true,
+                    room_locked: false,
+                    room_pin_required: false,
+                });
+            }
             startHostTickLoop();
             updateRoleUI();
             renderQueue();
@@ -2283,23 +2544,118 @@
             if (chatInput) chatInput.disabled = true;
         }
 
-        function enterKnockMode(kickInfo) {
-            document.getElementById('knockModal').classList.add('open');
-            document.getElementById('knockHostName').textContent = kickInfo.kicked_by || 'host';
-            document.getElementById('knockTimeoutHint').style.display = 'none';
-            document.getElementById('knockRetryBtn').style.display = 'none';
+        function checkRoomLockGate(presenceState) {
+            if (isHost || isTempHost || !presenceState || typeof presenceState !== 'object') return;
+            let lockedHost = null;
+            let unlockedHost = null;
+            for (const list of Object.values(presenceState)) {
+                if (!Array.isArray(list)) continue;
+                for (const entry of list) {
+                    if (!entry || !entry.is_host) continue;
+                    if (entry.room_locked) lockedHost = entry;
+                    else unlockedHost = entry;
+                }
+            }
 
-            tempSyncChannel = window.watchParty.subscribeToSync(roomId, {
-                onKnockResponse: handleKnockResponse,
-            });
-            setTimeout(sendKnockRequest, 800);
+            if (lockedHost && !guestAccessApproved) {
+                if (!knockModeActive) {
+                    isSyncing = true;
+                    try { videoPlayer.pause(); } catch (e) {}
+                    try { if (youtubePlayer && youtubePlayer.pauseVideo) youtubePlayer.pauseVideo(); } catch (e) {}
+                    const wrap = document.getElementById('videoWrapper');
+                    if (wrap) wrap.style.visibility = 'hidden';
+                    enterKnockMode({
+                        reason: lockedHost.room_pin_required ? 'pin' : 'lock',
+                        kicked_by: lockedHost.user_name || 'host',
+                        pinRequired: Boolean(lockedHost.room_pin_required),
+                    });
+                }
+            } else if (!lockedHost && unlockedHost) {
+                if (knockModeActive && currentKnockReason !== 'kick') {
+                    unlockGuestRoomGate('Kunci room dibuka oleh host.');
+                } else if (!guestAccessApproved) {
+                    guestAccessApproved = true;
+                }
+            }
         }
 
-        function sendKnockRequest() {
-            if (!tempSyncChannel) return;
+        function unlockGuestRoomGate(toastMsg) {
+            knockModeActive = false;
+            guestAccessApproved = true;
+            if (knockTimeout) clearTimeout(knockTimeout);
+            try { sessionStorage.setItem(`watchparty_unlocked_${roomId}`, '1'); } catch (e) {}
+            document.getElementById('knockModal').classList.remove('open');
+            document.getElementById('knockDeniedModal').classList.remove('open');
+            const wrap = document.getElementById('videoWrapper');
+            if (wrap) wrap.style.visibility = '';
+            isSyncing = false;
+            pendingManualResync = true;
+            if (syncChannel && playerType !== 'gdrive') {
+                window.watchParty.broadcastSyncRequest(syncChannel);
+            }
+            if (toastMsg) showSyncIndicator(toastMsg);
+        }
+
+        function enterKnockMode(info = {}) {
+            knockModeActive = true;
+            currentKnockReason = info.reason || 'kick';
+            const hostName = info.kicked_by || 'host';
+            const pinMode = currentKnockReason === 'pin' || Boolean(info.pinRequired);
+
+            document.getElementById('knockModal').classList.add('open');
             document.getElementById('knockTimeoutHint').style.display = 'none';
             document.getElementById('knockRetryBtn').style.display = 'none';
-            window.watchParty.broadcastKnock(tempSyncChannel, currentUserId, currentUserName);
+            const pinErr = document.getElementById('knockPinError');
+            if (pinErr) { pinErr.style.display = 'none'; pinErr.textContent = ''; }
+
+            const titleEl = document.getElementById('knockModalTitle');
+            const descEl = document.getElementById('knockStatusDesc');
+            const spinnerEl = document.getElementById('knockSpinner');
+            const pinBox = document.getElementById('knockPinBox');
+            const askBtn = document.getElementById('knockAskApprovalBtn');
+            const pinInput = document.getElementById('knockPinInput');
+
+            if (pinMode) {
+                titleEl.textContent = 'Room Terkunci (PIN)';
+                descEl.innerHTML = `Masukkan PIN dari <strong id="knockHostName">${syncLib.escapeHtml(hostName)}</strong> atau minta izin langsung.`;
+                if (spinnerEl) spinnerEl.style.display = 'none';
+                if (pinBox) pinBox.style.display = 'flex';
+                if (askBtn) askBtn.style.display = 'inline-flex';
+                if (pinInput) {
+                    pinInput.value = '';
+                    setTimeout(() => pinInput.focus(), 50);
+                }
+            } else {
+                titleEl.textContent = currentKnockReason === 'lock' ? 'Room Terkunci' : 'Meminta Izin Masuk';
+                descEl.innerHTML = `Menunggu <strong id="knockHostName">${syncLib.escapeHtml(hostName)}</strong> menyetujui permintaan masuk.`;
+                if (spinnerEl) spinnerEl.style.display = 'block';
+                if (pinBox) pinBox.style.display = 'none';
+                if (askBtn) askBtn.style.display = 'none';
+            }
+
+            if (!syncChannel && !tempSyncChannel) {
+                tempSyncChannel = window.watchParty.subscribeToSync(roomId, {
+                    onKnockResponse: handleKnockResponse,
+                });
+            }
+            if (!pinMode) {
+                setTimeout(() => sendKnockRequest(), 800);
+            }
+        }
+
+        function activeKnockChannel() {
+            return syncChannel || tempSyncChannel;
+        }
+
+        function sendKnockRequest(pinValue = '') {
+            const ch = activeKnockChannel();
+            if (!ch) return;
+            document.getElementById('knockTimeoutHint').style.display = 'none';
+            document.getElementById('knockRetryBtn').style.display = 'none';
+            window.watchParty.broadcastKnock(ch, currentUserId, currentUserName, {
+                pin: pinValue,
+                reason: currentKnockReason,
+            });
 
             if (knockTimeout) clearTimeout(knockTimeout);
             knockTimeout = setTimeout(() => {
@@ -2308,15 +2664,47 @@
             }, 30000);
         }
 
+        function submitKnockPin() {
+            const input = document.getElementById('knockPinInput');
+            const errEl = document.getElementById('knockPinError');
+            const pin = (input ? input.value : '').trim();
+            if (!/^\d{4,6}$/.test(pin)) {
+                if (errEl) {
+                    errEl.textContent = 'PIN harus 4 sampai 6 digit angka.';
+                    errEl.style.display = 'block';
+                }
+                if (input) input.focus();
+                return;
+            }
+            if (errEl) errEl.style.display = 'none';
+            const spinnerEl = document.getElementById('knockSpinner');
+            if (spinnerEl) spinnerEl.style.display = 'block';
+            sendKnockRequest(pin);
+        }
+
+        function requestManualApproval() {
+            const spinnerEl = document.getElementById('knockSpinner');
+            if (spinnerEl) spinnerEl.style.display = 'block';
+            sendKnockRequest('');
+        }
+
+        document.getElementById('knockPinInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitKnockPin();
+            }
+        });
+
         function retryKnock() { sendKnockRequest(); }
 
         function retryKnockFromDenied() {
             document.getElementById('knockDeniedModal').classList.remove('open');
             document.getElementById('knockModal').classList.add('open');
-            sendKnockRequest();
+            if (currentKnockReason !== 'pin') sendKnockRequest();
         }
 
         function cancelKnock() {
+            knockModeActive = false;
             if (knockTimeout) clearTimeout(knockTimeout);
             if (tempSyncChannel) {
                 window.watchParty.unsubscribeFromSync(tempSyncChannel);
@@ -2329,7 +2717,6 @@
         function handleKnockResponse(data) {
             if (!data || data.target_user_id !== currentUserId) return;
             if (knockTimeout) clearTimeout(knockTimeout);
-            document.getElementById('knockModal').classList.remove('open');
 
             if (data.approved) {
                 localStorage.removeItem(`watchparty_kicked_${roomId}`);
@@ -2337,20 +2724,66 @@
                     window.watchParty.unsubscribeFromSync(tempSyncChannel);
                     tempSyncChannel = null;
                 }
-                showSyncIndicator('Permintaan masuk disetujui.');
-                loadRoom();
-            } else {
-                document.getElementById('knockDeniedModal').classList.add('open');
-                document.getElementById('knockDeniedMessage').textContent = `${data.host_name || 'Host'} menolak permintaanmu.`;
+                if (!roomLoadedOnce) {
+                    knockModeActive = false;
+                    guestAccessApproved = true;
+                    try { sessionStorage.setItem(`watchparty_unlocked_${roomId}`, '1'); } catch (e) {}
+                    document.getElementById('knockModal').classList.remove('open');
+                    showSyncIndicator('Permintaan masuk disetujui.');
+                    loadRoom();
+                } else {
+                    unlockGuestRoomGate(data.reason === 'pin' ? 'PIN benar. Selamat menonton.' : 'Permintaan masuk disetujui.');
+                }
+                return;
             }
+
+            if (currentKnockReason === 'pin' && data.reason && data.reason.includes('PIN')) {
+                const spinnerEl = document.getElementById('knockSpinner');
+                const errEl = document.getElementById('knockPinError');
+                const pinInput = document.getElementById('knockPinInput');
+                if (spinnerEl) spinnerEl.style.display = 'none';
+                if (errEl) {
+                    errEl.textContent = data.reason;
+                    errEl.style.display = 'block';
+                }
+                if (pinInput) {
+                    pinInput.value = '';
+                    pinInput.focus();
+                }
+                return;
+            }
+
+            document.getElementById('knockModal').classList.remove('open');
+            document.getElementById('knockDeniedModal').classList.add('open');
+            document.getElementById('knockDeniedMessage').textContent = data.reason || `${data.host_name || 'Host'} menolak permintaanmu.`;
         }
 
         function handleKnockRequest(data) {
             if (!isHost || !data) return;
+            if (roomLockConfig.pin && data.pin) {
+                if (data.pin === roomLockConfig.pin) {
+                    window.watchParty.broadcastKnockResponse(syncChannel, data.user_id, true, currentUserName || 'Host', { reason: 'pin' });
+                    showSyncIndicator(`${data.user_name || 'Peserta'} masuk dengan PIN.`);
+                } else {
+                    window.watchParty.broadcastKnockResponse(syncChannel, data.user_id, false, currentUserName || 'Host', { reason: 'PIN salah. Periksa kembali PIN room.' });
+                }
+                return;
+            }
+
             pendingKnockData = data;
             const userName = data.user_name || 'Guest';
+            const isLockReq = data.reason === 'lock' || data.reason === 'pin';
             document.getElementById('knockUserAvatar').textContent = userName.charAt(0).toUpperCase();
-            document.getElementById('knockUserName').textContent = userName;
+            document.getElementById('knockReceivedTitle').textContent = isLockReq ? 'Permintaan Masuk Room' : 'Permintaan Masuk Kembali';
+            const promptEl = document.getElementById('knockReceivedPrompt');
+            if (promptEl) {
+                promptEl.innerHTML = isLockReq
+                    ? `<strong id="knockUserName">${syncLib.escapeHtml(userName)}</strong> meminta izin masuk ke room.`
+                    : `<strong id="knockUserName">${syncLib.escapeHtml(userName)}</strong> meminta izin bergabung kembali.`;
+            }
+            document.getElementById('knockNote').textContent = isLockReq
+                ? 'Room sedang dikunci. Izinkan atau tolak peserta ini.'
+                : 'Peserta ini sebelumnya pernah dikeluarkan dari room.';
             document.getElementById('knockReceivedModal').classList.add('open');
         }
 
@@ -2700,8 +3133,8 @@
             return div;
         }
 
-        function sendChatMessage() {
-            const input = document.getElementById('chatInput');
+        function submitChatFromInput(input) {
+            if (!input) return;
             const text = input.value.trim();
             if (!text) return;
 
@@ -2739,12 +3172,32 @@
             if (typingTimeout) clearTimeout(typingTimeout);
         }
 
+        function sendChatMessage() {
+            submitChatFromInput(document.getElementById('chatInput'));
+        }
+
+        function sendFullscreenChatMessage() {
+            submitChatFromInput(document.getElementById('fullscreenChatInput'));
+        }
+
         document.getElementById('chatInput').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 sendChatMessage();
             }
         });
+
+        const fsChatInput = document.getElementById('fullscreenChatInput');
+        if (fsChatInput) {
+            fsChatInput.addEventListener('keydown', (e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    sendFullscreenChatMessage();
+                }
+            });
+            fsChatInput.addEventListener('click', (e) => e.stopPropagation());
+        }
 
         function displayChatMessage(message, isOwn = false, opts = {}) {
             const isFromMe = isOwn || message.user_id === currentUserId;
@@ -2915,6 +3368,11 @@
                 updateRoomStatus('pause');
             });
 
+            videoPlayer.addEventListener('error', () => {
+                if (isLeavingPage || playerType !== 'html5' || (!videoPlayer.getAttribute('src') && !activeHlsPlayer)) return;
+                showStatus('Video tidak dapat dimuat (format tidak didukung browser atau diblokir CORS).', 'error');
+            });
+
             videoPlayer.addEventListener('seeked', () => {
                 if (isLeavingPage) return;
                 if (!isHost) {
@@ -3036,6 +3494,10 @@
 
         function updateSubtitleBtn() {
             const btn = document.getElementById('subtitleToggleBtn');
+            const uploadBtn = document.getElementById('subtitleUploadBtn');
+            if (uploadBtn) {
+                uploadBtn.style.display = playerType === 'html5' ? 'inline-flex' : 'none';
+            }
             if (!btn) return;
             btn.style.display = playerType === 'gdrive' ? 'none' : 'inline-flex';
             btn.classList.toggle('active', subtitleEnabled);

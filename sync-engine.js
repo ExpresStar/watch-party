@@ -61,6 +61,47 @@
     return typeof url === "string" && url.startsWith(LOCAL_PREFIX);
   }
 
+  function isHlsUrl(url) {
+    if (!url || typeof url !== "string") return false;
+    const clean = url.trim();
+    try {
+      const parsed = new URL(clean);
+      return /\.m3u8$/i.test(parsed.pathname || "");
+    } catch {
+      return /\.m3u8(?:[?#]|$)/i.test(clean);
+    }
+  }
+
+  /**
+   * Convert .srt (or normalize .vtt) subtitle text into browser-ready WebVTT.
+   */
+  function srtToVtt(rawText) {
+    const clean = String(rawText || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+    if (/^\s*WEBVTT(?:\s|$)/i.test(clean)) {
+      return clean.trim() + "\n";
+    }
+    const tsRe = /^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})(.*)$/;
+    const lines = clean.split("\n");
+    const out = ["WEBVTT", ""];
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      const nextLine = i + 1 < lines.length ? lines[i + 1].trim() : "";
+      // Skip numeric SRT cue index directly preceding a timing line
+      if (/^\d+$/.test(trimmed) && tsRe.test(nextLine)) {
+        continue;
+      }
+      const m = trimmed.match(tsRe);
+      if (m) {
+        const h1 = m[1].padStart(2, "0");
+        const h2 = m[5].padStart(2, "0");
+        out.push(`${h1}:${m[2]}:${m[3]}.${m[4]} --> ${h2}:${m[6]}:${m[7]}.${m[8]}${m[9] || ""}`);
+      } else {
+        out.push(lines[i]);
+      }
+    }
+    return out.join("\n").trimEnd() + "\n";
+  }
+
   function makeLocalVideoUrl(fileName) {
     const clean = (fileName || "video.mp4").trim();
     return LOCAL_PREFIX + encodeURIComponent(clean);
@@ -223,6 +264,40 @@
     return clean.slice(0, Math.max(1, maxLen - 3)).trimEnd() + "...";
   }
 
+  /**
+   * Maintain a deduplicated, capped list of recently visited rooms.
+   */
+  function addRecentRoom(list, entry, maxItems = 5) {
+    const existing = Array.isArray(list) ? list : [];
+    const rawId = entry && entry.id ? String(entry.id).trim().toUpperCase() : "";
+    if (!rawId) return existing.slice(0, maxItems);
+
+    const prev = existing.find((item) => item && String(item.id || "").toUpperCase() === rawId);
+    const genericTitles = new Set(["", "memuat video...", "video", "tanpa sumber video"]);
+    const rawTitle = entry && entry.title ? String(entry.title).trim() : "";
+    const chosenTitle = !genericTitles.has(rawTitle.toLowerCase())
+      ? rawTitle
+      : (prev && prev.title ? prev.title : "Watch Party");
+
+    const normalized = {
+      id: rawId,
+      title: truncateChatSnippet(chosenTitle, 72),
+      role: entry && entry.role === "Host" ? "Host" : "Guest",
+      updatedAt: Number.isFinite(entry && entry.updatedAt) ? entry.updatedAt : Date.now(),
+    };
+
+    const filtered = existing.filter(
+      (item) => item && item.id && String(item.id).toUpperCase() !== rawId,
+    );
+    return [normalized, ...filtered].slice(0, Math.max(1, maxItems));
+  }
+
+  function removeRecentRoom(list, roomId) {
+    const target = String(roomId || "").trim().toUpperCase();
+    if (!Array.isArray(list) || !target) return Array.isArray(list) ? list : [];
+    return list.filter((item) => item && String(item.id || "").toUpperCase() !== target);
+  }
+
   return {
     SEEK_THRESHOLD_SEC,
     escapeHtml,
@@ -231,8 +306,10 @@
     isGoogleDriveUrl,
     getGoogleDriveFileId,
     isLocalVideoUrl,
+    isHlsUrl,
     makeLocalVideoUrl,
     getLocalVideoName,
+    srtToVtt,
     estimateClockSample,
     pickBestClockSample,
     computeTargetPlaybackTime,
@@ -240,5 +317,7 @@
     hasOnlineHost,
     selectNextHostCandidate,
     truncateChatSnippet,
+    addRecentRoom,
+    removeRecentRoom,
   };
 });

@@ -186,7 +186,25 @@ assert.equal(sync.selectNextHostCandidate(tieStateA, ["guest_a"]).id, "guest_b")
 assert.equal(sync.selectNextHostCandidate(tieStateA, ["guest_a", "guest_b"]), null);
 assert.equal(sync.truncateChatSnippet("   Halo    dunia   watch   party   ", 20), "Halo dunia watch...");
 
-// 9. Static anti-slop guard: zero em dashes across deliverables
+// 9. HLS URL detection, SRT-to-VTT conversion, and recent rooms helpers
+assert.equal(sync.isHlsUrl("https://cdn.example.com/live/master.m3u8?token=abc"), true);
+assert.equal(sync.isHlsUrl("https://cdn.example.com/video.mp4"), false);
+const vttOut = sync.srtToVtt("\uFEFF1\r\n0:01:02,500 --> 00:01:05,250\r\nHarga 1,500 rupiah.\r\n");
+assert.ok(vttOut.startsWith("WEBVTT\n\n"));
+assert.ok(vttOut.includes("00:01:02.500 --> 00:01:05.250"));
+assert.ok(vttOut.includes("Harga 1,500 rupiah."));
+assert.equal(vttOut.includes("\n1\n"), false);
+assert.equal(sync.srtToVtt("WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHalo\n"), "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHalo\n");
+
+let recents = sync.addRecentRoom([], { id: "k7p4m9", title: "Film A", role: "Host", updatedAt: 100 });
+recents = sync.addRecentRoom(recents, { id: "abcd23", title: "Film B", role: "Guest", updatedAt: 200 });
+recents = sync.addRecentRoom(recents, { id: "K7P4M9", title: "Memuat video...", role: "Host", updatedAt: 300 });
+assert.equal(recents.length, 2);
+assert.equal(recents[0].id, "K7P4M9");
+assert.equal(recents[0].title, "Film A");
+assert.equal(sync.removeRecentRoom(recents, "abcd23").length, 1);
+
+// 10. Static anti-slop guard: zero em dashes across deliverables
 for (const file of ["index.html", "room.html", "style.css", "supabase.js", "sync-engine.js", "voice.js"]) {
   const txt = fs.readFileSync(path.join(__dirname, file), "utf8");
   assert.equal(txt.includes("\u2014"), false, `${file} contains forbidden em dash`);

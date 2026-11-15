@@ -435,6 +435,7 @@ function subscribeToPresence(roomId, userId, isHost, userName, callbacks) {
     is_host: isHost,
     joined_at: new Date().toISOString(),
     online: true,
+    ...(callbacks && callbacks.initialPayload ? callbacks.initialPayload : {}),
   };
 
   channel
@@ -855,7 +856,7 @@ async function broadcastKick(channel, targetUserId, kickedBy) {
 /**
  * Broadcast knock request - kicked user wants to rejoin
  */
-async function broadcastKnock(channel, userId, userName) {
+async function broadcastKnock(channel, userId, userName, meta = {}) {
   if (channel) {
     await channel.send({
       type: "broadcast",
@@ -863,6 +864,8 @@ async function broadcastKnock(channel, userId, userName) {
       payload: {
         user_id: userId,
         user_name: userName || "Guest",
+        pin: meta && meta.pin ? String(meta.pin) : "",
+        reason: meta && meta.reason ? String(meta.reason) : "",
         timestamp: Date.now(),
       },
     });
@@ -877,6 +880,7 @@ async function broadcastKnockResponse(
   targetUserId,
   approved,
   hostName,
+  meta = {},
 ) {
   if (channel) {
     await channel.send({
@@ -886,6 +890,7 @@ async function broadcastKnockResponse(
         target_user_id: targetUserId,
         approved: approved,
         host_name: hostName || "Host",
+        reason: meta && meta.reason ? String(meta.reason) : "",
         timestamp: Date.now(),
       },
     });
@@ -1241,11 +1246,12 @@ function extractVideoTitle(url) {
   try {
     const urlObj = new URL(url);
     const pathname = urlObj.pathname;
-    const filename = pathname.split("/").pop();
+    const rawName = pathname.split("/").pop() || "";
+    const filename = decodeURIComponent(rawName);
     if (filename && filename.includes(".")) {
       return filename.substring(0, filename.lastIndexOf(".")) || "Video";
     }
-    return "Video";
+    return filename || "Video";
   } catch (e) {
     return "Video";
   }
@@ -1561,6 +1567,42 @@ function exitIOSFullscreen(element) {
   return false;
 }
 
+const RECENT_ROOMS_KEY = "watchparty_recent_rooms";
+
+function getRecentRooms() {
+  try {
+    const raw = localStorage.getItem(RECENT_ROOMS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveRecentRoomEntry(entry) {
+  const syncApi = typeof window !== "undefined" ? window.watchPartySync : null;
+  const list = getRecentRooms();
+  const next = syncApi && typeof syncApi.addRecentRoom === "function"
+    ? syncApi.addRecentRoom(list, entry, 5)
+    : list;
+  try {
+    localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(next));
+  } catch (e) {}
+  return next;
+}
+
+function removeRecentRoomEntry(roomId) {
+  const syncApi = typeof window !== "undefined" ? window.watchPartySync : null;
+  const list = getRecentRooms();
+  const next = syncApi && typeof syncApi.removeRecentRoom === "function"
+    ? syncApi.removeRecentRoom(list, roomId)
+    : list.filter((item) => item && item.id !== roomId);
+  try {
+    localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(next));
+  } catch (e) {}
+  return next;
+}
+
 // Export untuk digunakan di file lain
 if (typeof window !== "undefined") {
 window.watchParty = {
@@ -1586,6 +1628,9 @@ window.watchParty = {
   getChatHistory,
   saveChatMessage,
   clearChatHistory,
+  getRecentRooms,
+  saveRecentRoomEntry,
+  removeRecentRoomEntry,
   subscribeToSync,
   broadcastStatus,
   broadcastSyncTick,

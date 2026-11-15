@@ -67,7 +67,7 @@
                             class="field-input"
                             id="videoUrl"
                             name="videoUrl"
-                            placeholder="Paste URL YouTube / .mp4, atau ketik judul..."
+                            placeholder="Paste URL YouTube, .mp4, atau .m3u8, atau ketik judul..."
                             autocomplete="off"
                             required
                         >
@@ -88,6 +88,20 @@
                             <span>Pakai File Video Lokal</span>
                         </label>
                         <input type="file" id="localRoomFile" accept="video/*" style="display: none;">
+                    </div>
+
+                    <div class="room-pin-box">
+                        <label class="field-label" for="roomPinInput">PIN Room (opsional)</label>
+                        <input
+                            type="password"
+                            class="field-input mono-code"
+                            id="roomPinInput"
+                            placeholder="4-6 digit angka, kosongkan bila terbuka"
+                            maxlength="6"
+                            inputmode="numeric"
+                            autocomplete="off"
+                        >
+                        <span class="room-pin-hint">Tamu perlu memasukkan PIN atau menunggu persetujuan saat host online di room.</span>
                     </div>
 
                     <div style="margin-top: 16px;">
@@ -121,6 +135,10 @@
                     </div>
                     <div id="joinStatusMessage" class="status-banner" style="display: none; margin-top: 12px;"></div>
                 </form>
+                <div id="recentRoomsSection" class="recent-rooms-box" style="display: none;">
+                    <div class="recent-rooms-header">Room Terakhir</div>
+                    <div id="recentRoomsList" class="recent-room-list"></div>
+                </div>
             </div>
         </section>
     </main>
@@ -271,6 +289,12 @@
                 hintChip.style.display = 'inline-flex';
                 searchYtBtn.style.display = 'none';
                 suggestionsEl.style.display = 'none';
+            } else if (syncLib.isHlsUrl(val)) {
+                hintChip.classList.add('yt');
+                hintChip.textContent = 'Stream HLS (.m3u8) terdeteksi (sinkronisasi aktif)';
+                hintChip.style.display = 'inline-flex';
+                searchYtBtn.style.display = 'none';
+                suggestionsEl.style.display = 'none';
             } else if (/^https?:\/\//i.test(val)) {
                 hintChip.classList.add('yt');
                 hintChip.textContent = 'Tautan video langsung terdeteksi';
@@ -369,8 +393,13 @@
             if (!checkSupabaseConfig()) return;
 
             const rawUrl = document.getElementById('videoUrl').value.trim();
+            const roomPin = (document.getElementById('roomPinInput')?.value || '').trim();
             if (!rawUrl) {
                 showStatus('statusMessage', 'Masukkan URL video atau pilih file video lokal.', 'error');
+                return;
+            }
+            if (roomPin && !/^\d{4,6}$/.test(roomPin)) {
+                showStatus('statusMessage', 'PIN room harus terdiri dari 4 sampai 6 digit angka.', 'error');
                 return;
             }
 
@@ -393,6 +422,15 @@
 
             try {
                 const roomId = await window.watchParty.createRoom(rawUrl);
+                if (roomPin) {
+                    try {
+                        localStorage.setItem(`watchparty_room_lock_${roomId}`, JSON.stringify({ locked: true, pin: roomPin }));
+                    } catch (e) {}
+                }
+                const initialTitle = syncLib.isLocalVideoUrl(rawUrl)
+                    ? syncLib.getLocalVideoName(rawUrl)
+                    : window.watchParty.extractVideoTitle(rawUrl);
+                window.watchParty.saveRecentRoomEntry({ id: roomId, title: initialTitle, role: 'Host' });
                 showStatus('statusMessage', 'Room siap. Mengalihkan ke ruang tonton...', 'success');
                 setTimeout(() => {
                     window.location.href = `room.html?id=${encodeURIComponent(roomId)}`;
@@ -404,6 +442,53 @@
                 btn.textContent = 'Buat Room Tonton';
             }
         });
+
+        function renderRecentRooms() {
+            const section = document.getElementById('recentRoomsSection');
+            const listEl = document.getElementById('recentRoomsList');
+            if (!section || !listEl || !window.watchParty || typeof window.watchParty.getRecentRooms !== 'function') return;
+            const rooms = window.watchParty.getRecentRooms();
+            if (!rooms.length) {
+                section.style.display = 'none';
+                listEl.innerHTML = '';
+                return;
+            }
+            listEl.innerHTML = '';
+            rooms.forEach((entry) => {
+                const row = document.createElement('div');
+                row.className = 'recent-room-row';
+
+                const openBtn = document.createElement('button');
+                openBtn.type = 'button';
+                openBtn.className = 'recent-room-open';
+                openBtn.innerHTML = `
+                    <span class="recent-room-code">${syncLib.escapeHtml(entry.id)}</span>
+                    <span class="recent-room-meta">
+                        <span class="recent-room-name">${syncLib.escapeHtml(entry.title || 'Watch Party')}</span>
+                        <span class="recent-room-role">${syncLib.escapeHtml(entry.role || 'Guest')}</span>
+                    </span>
+                `;
+                openBtn.addEventListener('click', () => {
+                    window.location.href = `room.html?id=${encodeURIComponent(entry.id)}`;
+                });
+
+                const rmBtn = document.createElement('button');
+                rmBtn.type = 'button';
+                rmBtn.className = 'recent-room-remove';
+                rmBtn.title = `Hapus ${entry.id} dari riwayat`;
+                rmBtn.setAttribute('aria-label', `Hapus ${entry.id} dari riwayat`);
+                rmBtn.textContent = '✕';
+                rmBtn.addEventListener('click', () => {
+                    window.watchParty.removeRecentRoomEntry(entry.id);
+                    renderRecentRooms();
+                });
+
+                row.appendChild(openBtn);
+                row.appendChild(rmBtn);
+                listEl.appendChild(row);
+            });
+            section.style.display = 'flex';
+        }
 
         document.getElementById('joinRoomForm').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -444,6 +529,7 @@
         document.addEventListener('DOMContentLoaded', () => {
             checkSupabaseConfig();
             checkUserName();
+            renderRecentRooms();
 
             const urlParams = new URLSearchParams(window.location.search);
             const roomParam = urlParams.get('room');
