@@ -164,7 +164,29 @@ assert.equal(
   "seek_play",
 );
 
-// 8. Static anti-slop guard: zero em dashes across deliverables
+// 8. Host election determinism & online host detection
+assert.equal(sync.hasOnlineHost({}), false);
+assert.equal(
+  sync.hasOnlineHost({ u1: [{ user_id: "u1", is_host: false }], u2: [{ user_id: "u2", is_host: true }] }),
+  true,
+);
+const tieStateA = {
+  host1: [{ user_id: "host1", user_name: "Host", is_host: true, joined_at: "2026-01-01T10:00:00.000Z" }],
+  guest_b: [{ user_id: "guest_b", user_name: "Budi", is_host: false, joined_at: "2026-01-01T10:05:00.000Z" }],
+  guest_a: [{ user_id: "guest_a", user_name: "Ani", is_host: false, joined_at: "2026-01-01T10:05:00.000Z" }],
+};
+const tieStateB = {
+  guest_a: tieStateA.guest_a,
+  host1: tieStateA.host1,
+  guest_b: tieStateA.guest_b,
+};
+assert.equal(sync.selectNextHostCandidate(tieStateA).id, "guest_a");
+assert.equal(sync.selectNextHostCandidate(tieStateB).id, "guest_a");
+assert.equal(sync.selectNextHostCandidate(tieStateA, ["guest_a"]).id, "guest_b");
+assert.equal(sync.selectNextHostCandidate(tieStateA, ["guest_a", "guest_b"]), null);
+assert.equal(sync.truncateChatSnippet("   Halo    dunia   watch   party   ", 20), "Halo dunia watch...");
+
+// 9. Static anti-slop guard: zero em dashes across deliverables
 for (const file of ["index.html", "room.html", "style.css", "supabase.js", "sync-engine.js", "voice.js"]) {
   const txt = fs.readFileSync(path.join(__dirname, file), "utf8");
   assert.equal(txt.includes("\u2014"), false, `${file} contains forbidden em dash`);

@@ -175,6 +175,54 @@
     return { action: "aligned", targetTime: safeTarget, drift, rate: 1.0 };
   }
 
+  /**
+   * Check whether at least one online presence entry currently holds host role.
+   */
+  function hasOnlineHost(presenceState) {
+    if (!presenceState || typeof presenceState !== "object") return false;
+    return Object.values(presenceState).some(
+      (list) => Array.isArray(list) && list.some((entry) => entry && Boolean(entry.is_host)),
+    );
+  }
+
+  /**
+   * Deterministically pick the next temporary host from online guests so peers never split-brain.
+   */
+  function selectNextHostCandidate(presenceState, excludeUserIds = []) {
+    if (!presenceState || typeof presenceState !== "object") return null;
+    const excluded = new Set(Array.isArray(excludeUserIds) ? excludeUserIds : []);
+    const candidates = [];
+
+    for (const [uid, list] of Object.entries(presenceState)) {
+      if (!uid || excluded.has(uid) || !Array.isArray(list) || list.length === 0) continue;
+      const entry = list[0] || {};
+      if (entry.is_host) continue;
+      const parsedMs = entry.joined_at ? Date.parse(entry.joined_at) : NaN;
+      const joinedMs = Number.isFinite(parsedMs) ? parsedMs : Number.MAX_SAFE_INTEGER;
+      candidates.push({
+        id: uid,
+        name: entry.user_name || "Guest",
+        joinedMs,
+      });
+    }
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      if (a.joinedMs !== b.joinedMs) return a.joinedMs - b.joinedMs;
+      return String(a.id).localeCompare(String(b.id));
+    });
+    return candidates[0];
+  }
+
+  /**
+   * Normalize whitespace and cap snippet length cleanly for chat replies & notifications.
+   */
+  function truncateChatSnippet(text, maxLen = 90) {
+    const clean = String(text || "").replace(/\s+/g, " ").trim();
+    if (clean.length <= maxLen) return clean;
+    return clean.slice(0, Math.max(1, maxLen - 3)).trimEnd() + "...";
+  }
+
   return {
     SEEK_THRESHOLD_SEC,
     escapeHtml,
@@ -189,5 +237,8 @@
     pickBestClockSample,
     computeTargetPlaybackTime,
     decideSyncAction,
+    hasOnlineHost,
+    selectNextHostCandidate,
+    truncateChatSnippet,
   };
 });

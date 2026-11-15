@@ -378,14 +378,26 @@
             <!-- Right Column: Live Chat -->
             <aside class="chat-card" aria-label="Live Chat">
                 <div class="chat-header">
-                    <span>Live Chat</span>
-                    <span style="font-size: 0.78rem; color: var(--text-muted); font-weight: 500;" id="chatOnlineHint">Realtime</span>
+                    <div class="chat-header-title">
+                        <span>Live Chat</span>
+                        <button type="button" class="chat-unread-pill" id="chatUnreadPill" onclick="scrollChatToBottom()" style="display: none;" title="Gulir ke pesan terbaru">0 baru</button>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm chat-notif-btn" id="chatNotifBtn" onclick="toggleChatNotifications()" title="Aktifkan notifikasi chat saat pindah tab">
+                        Notif: Off
+                    </button>
                 </div>
                 <div class="chat-messages" id="chatMessages">
                     <div class="chat-system">Selamat datang di Watch Party. Jaga obrolan tetap nyaman.</div>
                 </div>
                 <div class="typing-indicator" id="typingIndicator" style="display: none;">
                     <span id="typingText">Sedang mengetik...</span>
+                </div>
+                <div class="chat-reply-preview" id="chatReplyPreview" style="display: none;">
+                    <div class="chat-reply-preview-body">
+                        <span class="chat-reply-preview-author" id="chatReplyAuthor"></span>
+                        <span class="chat-reply-preview-text" id="chatReplyText"></span>
+                    </div>
+                    <button type="button" class="chat-reply-cancel" id="chatReplyCancel" onclick="clearChatReply()" aria-label="Batal balas chat">✕</button>
                 </div>
                 <div class="chat-input-container">
                     <input type="text" class="field-input" id="chatInput" placeholder="Ketik pesan..." maxlength="500" autocomplete="off">
@@ -484,15 +496,28 @@
         let pingRefreshInterval = null;
         let guestDbBackupInterval = null;
 
-        // Presence / Notification debounce
+        // Presence / Host / Notification state
+        let awaitingReclaimSync = false;
+        let hostReclaimFallbackTimer = null;
+        let hostlessRoomTimer = null;
+        let initialPresenceSynced = false;
+        const roomEnteredAtMs = Date.now();
         let greetedUsers = new Set();
         let leaveTimers = {};
         let hostTransferTimers = {};
         const LEAVE_NOTIF_DELAY_MS = 12000;
-        const HOST_TRANSFER_GRACE_MS = 10000;
+        const HOST_TRANSFER_GRACE_MS = 6000;
 
         // Chat / Voice / Fullscreen state
         let chatMessages = [];
+        let pendingReplyTo = null;
+        let unreadChatCount = 0;
+        let unreadScrolledCount = 0;
+        const basePageTitle = document.title;
+        let chatNotifEnabled = false;
+        try { chatNotifEnabled = localStorage.getItem('watchparty_chat_notif') === '1'; } catch (e) {}
+        let chatAudioCtx = null;
+        let activeChatNotification = null;
         let lastVideoId = null;
         let subtitleEnabled = true;
         let isIOSFakeFullscreen = false;
@@ -1031,7 +1056,7 @@
                     updateStatusDisplay('play');
                     ensureYouTubeMutedAutoplayFallback();
                 }
-                setTimeout(() => { if (!isTempHost) isSyncing = false; }, 500);
+                setTimeout(() => { if (!awaitingReclaimSync) isSyncing = false; }, 500);
             }
 
             if (youtubeTimeInterval) clearInterval(youtubeTimeInterval);
@@ -1055,30 +1080,33 @@
                 return;
             }
 
-            if (!isHost) {
+            if (!isHost || awaitingReclaimSync) {
                 if (state === YT.PlayerState.PLAYING) {
                     recordSeekCompletion();
                     if (ytAutoplayFallbackTimer) {
                         clearTimeout(ytAutoplayFallbackTimer);
                         ytAutoplayFallbackTimer = null;
                     }
-                    if (ytPendingSeekAfterStart !== null && (!roomData || roomData.status === 'play')) {
+                    if (ytPendingSeekAfterStart !== null && (!roomData || roomData.status === 'play' || awaitingReclaimSync)) {
                         const pendingTarget = ytPendingSeekAfterStart;
                         ytPendingSeekAfterStart = null;
                         const nowPos = youtubePlayer.getCurrentTime ? (youtubePlayer.getCurrentTime() || 0) : 0;
                         if (Math.abs(nowPos - pendingTarget) > 0.85) {
                             isSyncing = true;
                             executePlayerSeek(pendingTarget, 'play');
-                            setTimeout(() => { isSyncing = false; }, 220);
+                            setTimeout(() => { if (!awaitingReclaimSync) isSyncing = false; }, 220);
                         }
                     }
-                    try {
-                        if (youtubePlayer.isMuted && !youtubePlayer.isMuted()) {
-                            guestHasInteracted = true;
-                            showAudioUnlockBar(false);
-                        }
-                    } catch (e) {}
+                    if (!isHost) {
+                        try {
+                            if (youtubePlayer.isMuted && !youtubePlayer.isMuted()) {
+                                guestHasInteracted = true;
+                                showAudioUnlockBar(false);
+                            }
+                        } catch (e) {}
+                    }
                 }
+                if (awaitingReclaimSync) return;
 
                 if (isSyncing || isLeavingPage || !initialGuestSyncDone) return;
 
@@ -1189,7 +1217,7 @@
         function startHostTickLoop() {
             if (hostTickInterval) clearInterval(hostTickInterval);
             hostTickInterval = setInterval(() => {
-                if (!isHost || isLeavingPage || isSyncing || !syncChannel || playerType === 'gdrive') return;
+                if (!isHost || awaitingReclaimSync || isLeavingPage || isSyncing || !syncChannel || playerType === 'gdrive') return;
                 const snap = getPlaybackSnapshot();
                 if (snap.status === 'play') {
                     hostTickSeq += 1;
@@ -1255,7 +1283,8 @@
         }
 
         function applySyncedPlayback({ status, currentTime, sentAt, forceSeek = false, source = 'sync' }) {
-            if (isHost || !status || playerType === 'gdrive') return;
+            const allowSyncAsReclaim = isHost && awaitingReclaimSync;
+            if ((isHost && !allowSyncAsReclaim) || !status || playerType === 'gdrive') return;
             if (source === 'tick' && document.hidden) return;
 
             const nowMs = Date.now();
@@ -1311,7 +1340,7 @@
                         updateSyncHealthUI('adjusting', 'Memuat video...');
                     } else if (notStartedYet) {
                         ytPendingSeekAfterStart = Math.abs(decision.drift) > 0.85 ? decision.targetTime : null;
-                        if (IS_MOBILE_BROWSER || !guestHasInteracted) {
+                        if (!isHost && (IS_MOBILE_BROWSER || !guestHasInteracted)) {
                             try {
                                 youtubePlayer.mute();
                                 showAudioUnlockBar(true);
@@ -1356,7 +1385,7 @@
                         updateStatusDisplay('play');
                     }
                 }
-                setTimeout(() => { isSyncing = false; }, 140);
+                setTimeout(() => { if (!awaitingReclaimSync) isSyncing = false; }, 140);
                 return;
             }
 
@@ -1383,7 +1412,7 @@
                     updateStatusDisplay('pause');
                     updateSyncHealthUI('synced', formatSyncDetail(decision.drift));
                 } else {
-                    if (!guestHasInteracted && !videoPlayer.muted) {
+                    if (!isHost && !guestHasInteracted && !videoPlayer.muted) {
                         videoPlayer.muted = true;
                         showAudioUnlockBar(true);
                     }
@@ -1409,11 +1438,11 @@
                     }
                     updateStatusDisplay('play');
                 }
-                setTimeout(() => { isSyncing = false; }, 140);
+                setTimeout(() => { if (!awaitingReclaimSync) isSyncing = false; }, 140);
                 return;
             }
 
-            setTimeout(() => { isSyncing = false; }, 140);
+            setTimeout(() => { if (!awaitingReclaimSync) isSyncing = false; }, 140);
         }
 
         function formatSyncDetail(driftSec) {
@@ -1597,6 +1626,7 @@
                 isHost = window.watchParty.checkIsHost(roomData);
                 if (isHost) {
                     isSyncing = true;
+                    awaitingReclaimSync = !isTempHost;
                     startExpiryTimer();
                 }
 
@@ -1616,6 +1646,7 @@
 
                 if (isHost) {
                     startHostTickLoop();
+                    if (!isTempHost) handleHostRejoinSync();
                 } else {
                     startClockCalibrationLoop();
                     // Periodic DB backup every 30s
@@ -1669,9 +1700,6 @@
                             youtubeApiReady = true;
                             clearInterval(waitApi);
                             createYouTubePlayer(videoId, shouldAuto, isInitialLoad ? startPos : 0);
-                            if (isInitialLoad && isHost && !isTempHost) {
-                                handleHostRejoinSync();
-                            }
                         }
                     }, 80);
                 }
@@ -1698,7 +1726,7 @@
             if (syncLib.isLocalVideoUrl(videoUrl)) {
                 updateSourceNoticeBar(videoUrl);
                 updateStatusDisplay(roomData ? roomData.status : 'pause');
-                if (isHost && !isTempHost) isSyncing = false;
+                if (isHost && !awaitingReclaimSync) isSyncing = false;
                 return;
             }
 
@@ -1720,27 +1748,66 @@
                 if (roomData && roomData.current_time_sec > 0) {
                     videoPlayer.currentTime = roomData.current_time_sec;
                 }
-                if (isInitialLoad && !isTempHost) handleHostRejoinSync();
-                else if (!isInitialLoad) {
+                if (!isInitialLoad) {
                     videoPlayer.play().catch(() => {});
+                }
+                if (!awaitingReclaimSync) {
+                    setTimeout(() => { if (!awaitingReclaimSync) isSyncing = false; }, 350);
                 }
             }
         }
 
+        function scheduleFinalizeHostReclaim(delayMs) {
+            if (hostReclaimFallbackTimer) clearTimeout(hostReclaimFallbackTimer);
+            hostReclaimFallbackTimer = setTimeout(finalizeHostReclaim, delayMs);
+        }
+
+        function finalizeHostReclaim() {
+            if (!awaitingReclaimSync || isLeavingPage) return;
+            awaitingReclaimSync = false;
+            isSyncing = false;
+            if (hostReclaimFallbackTimer) {
+                clearTimeout(hostReclaimFallbackTimer);
+                hostReclaimFallbackTimer = null;
+            }
+            if (playerType === 'youtube' && youtubePlayer && youtubePlayer.getCurrentTime) {
+                try {
+                    if (youtubePlayer.setPlaybackRate) youtubePlayer.setPlaybackRate(1);
+                    lastHostYtPos = youtubePlayer.getCurrentTime() || 0;
+                    lastHostYtSampleAt = Date.now();
+                    lastHostYtState = youtubePlayer.getPlayerState ? youtubePlayer.getPlayerState() : -1;
+                } catch (e) {}
+            } else if (videoPlayer) {
+                videoPlayer.playbackRate = 1.0;
+            }
+            if (syncChannel) {
+                window.watchParty.broadcastHostReclaim(syncChannel, currentUserId);
+            }
+            updateRoleUI();
+            showSyncIndicator('Host kembali. Kendali pemutar dikembalikan.');
+        }
+
         function handleHostRejoinSync() {
+            if (!isHost || isTempHost) {
+                awaitingReclaimSync = false;
+                isSyncing = false;
+                return;
+            }
+            awaitingReclaimSync = true;
+            isSyncing = true;
             setTimeout(() => {
+                if (isLeavingPage || !awaitingReclaimSync) return;
                 const others = Object.keys(window.currentPresenceState || {}).filter(id => id !== currentUserId);
-                if (others.length > 0 && syncChannel) {
+                if (others.length > 0 && syncChannel && playerType !== 'gdrive') {
+                    window.watchParty.broadcastSyncPing(syncChannel, Date.now());
                     window.watchParty.broadcastSyncRequest(syncChannel);
-                    setTimeout(() => {
-                        isSyncing = false;
-                        window.watchParty.broadcastHostReclaim(syncChannel, currentUserId);
-                        showSyncIndicator('Host kembali. Kendali pemutar dikembalikan.');
-                    }, 2200);
+                    scheduleFinalizeHostReclaim(2200);
                 } else {
+                    awaitingReclaimSync = false;
                     isSyncing = false;
+                    updateRoleUI();
                 }
-            }, 1200);
+            }, 1000);
         }
 
         // ===========================================
@@ -1823,12 +1890,12 @@
                     }
                 },
                 onSyncPong: (data) => {
-                    if (isHost || !data) return;
+                    if ((isHost && !awaitingReclaimSync) || !data) return;
                     if (data.targetUserId && data.targetUserId !== currentUserId) return;
                     recordClockSample(data.clientTime, data.hostTime);
                 },
                 onSyncRequest: (data) => {
-                    if (isHost) {
+                    if (isHost && !awaitingReclaimSync) {
                         const snap = getPlaybackSnapshot();
                         window.watchParty.broadcastSyncResponse(syncChannel, {
                             targetUserId: data ? data.user_id : null,
@@ -1840,7 +1907,7 @@
                     }
                 },
                 onSyncResponse: (data) => {
-                    if (!isHost && data) {
+                    if ((!isHost || awaitingReclaimSync) && data) {
                         if (data.targetUserId && data.targetUserId !== currentUserId) return;
                         if (data.clientTime && data.hostTime) {
                             recordClockSample(data.clientTime, data.hostTime);
@@ -1851,15 +1918,18 @@
                                 lastSyncSeq = data.seq;
                             }
                         }
-                        const useForceSeek = pendingManualResync;
+                        const useForceSeek = pendingManualResync || awaitingReclaimSync;
                         pendingManualResync = false;
                         applySyncedPlayback({
                             status: data.status,
                             currentTime: data.currentTime,
                             sentAt: data.sentAt || data.timestamp,
                             forceSeek: useForceSeek,
-                            source: 'sync_response',
+                            source: awaitingReclaimSync ? 'reclaim' : 'sync_response',
                         });
+                        if (awaitingReclaimSync) {
+                            scheduleFinalizeHostReclaim(700);
+                        }
                     }
                 },
                 onReaction: (data) => showFloatingReaction(data.emoji),
@@ -1867,15 +1937,19 @@
                 onKick: (data) => handleKick(data),
                 onKnock: (data) => handleKnockRequest(data),
                 onHostTransfer: (data) => {
+                    if (!data || !data.new_host_id) return;
                     if (data.new_host_id === currentUserId) {
-                        becomeTemporaryHost();
-                    } else {
-                        showSyncIndicator(`${data.new_host_name || 'Peserta'} menjadi host sementara.`);
+                        becomeTemporaryHost({ broadcastNotice: false });
+                    } else if (!isHost) {
+                        const hName = data.new_host_name || 'Peserta';
+                        const txt = `${hName} menjadi host sementara.`;
+                        showSyncIndicator(txt);
+                        appendLocalSystemChat(txt);
                     }
                 },
                 onHostReclaim: (data) => {
-                    if (data.original_host_id === currentUserId) return;
-                    if (isTempHost) demoteFromHost(data.original_host_id);
+                    if (data && data.original_host_id === currentUserId) return;
+                    if (isTempHost) demoteFromHost();
                     else showSyncIndicator('Host asli kembali memegang kendali.');
                 },
             });
@@ -1892,6 +1966,17 @@
                 currentUserName,
                 {
                     onSync: (state) => {
+                        if (!initialPresenceSynced && state && Object.keys(state).length > 0) {
+                            Object.entries(state).forEach(([uid, list]) => {
+                                if (uid === currentUserId || !Array.isArray(list) || !list.length) return;
+                                const joinedAtMs = list[0].joined_at ? Date.parse(list[0].joined_at) : 0;
+                                if (!Number.isFinite(joinedAtMs) || joinedAtMs < roomEnteredAtMs - 2000) {
+                                    greetedUsers.add(uid);
+                                }
+                            });
+                            initialPresenceSynced = true;
+                        }
+
                         // Race check: if an older participant already owns the exact same name, prompt rename cleanly
                         const myList = state[currentUserId];
                         if (myList && myList.length && isDuplicateNameInRoom(currentUserName, state)) {
@@ -1907,6 +1992,25 @@
                                 showNameError(`Nama "${currentUserName}" sudah digunakan. Pilih nama lain.`);
                             }
                         }
+
+                        // Recover hostlessly joined rooms (e.g. original host left before guest arrived)
+                        const hasHost = syncLib.hasOnlineHost(state);
+                        if (isHost || hasHost || awaitingReclaimSync || !state || !state[currentUserId]) {
+                            if (hostlessRoomTimer) {
+                                clearTimeout(hostlessRoomTimer);
+                                hostlessRoomTimer = null;
+                            }
+                        } else if (!hostlessRoomTimer) {
+                            hostlessRoomTimer = setTimeout(() => {
+                                hostlessRoomTimer = null;
+                                if (isHost || awaitingReclaimSync || isLeavingPage) return;
+                                const cur = window.currentPresenceState || {};
+                                if (!syncLib.hasOnlineHost(cur)) {
+                                    checkAndPromoteSelf();
+                                }
+                            }, 4500);
+                        }
+
                         updateViewersDisplay(state);
                     },
                     onJoin: (newPresences) => {
@@ -1916,9 +2020,16 @@
                             const name = p.user_name || 'Guest';
                             if (leaveTimers[uid]) { clearTimeout(leaveTimers[uid]); delete leaveTimers[uid]; }
                             if (hostTransferTimers[uid]) { clearTimeout(hostTransferTimers[uid]); delete hostTransferTimers[uid]; }
+                            const joinedAtMs = p.joined_at ? Date.parse(p.joined_at) : 0;
+                            const isFreshJoin = initialPresenceSynced || (Number.isFinite(joinedAtMs) && joinedAtMs >= roomEnteredAtMs - 2000);
                             if (!greetedUsers.has(uid)) {
                                 greetedUsers.add(uid);
-                                showSyncIndicator(`${name} bergabung ke room.`);
+                                if (isFreshJoin) {
+                                    const greetText = `Selamat bergabung, ${name}!`;
+                                    showSyncIndicator(greetText);
+                                    appendLocalSystemChat(greetText);
+                                    notifyUserOffTab('Watch Party', greetText, { countUnread: false });
+                                }
                             }
                             if (VoiceChat.getIsJoined() && p.voice_on && p.voice_peer_id) {
                                 VoiceChat.connectToPeer(uid, p.voice_peer_id);
@@ -1938,19 +2049,16 @@
                                 if (cur[uid]) return;
                                 greetedUsers.delete(uid);
                                 showSyncIndicator(`${name} keluar.`);
-                                if (p.is_host && !isHost) {
-                                    const hasHost = Object.values(cur).some(arr => arr.some(item => item.is_host));
-                                    if (!hasHost) checkAndPromoteSelf();
-                                }
                             }, LEAVE_NOTIF_DELAY_MS);
 
-                            if (p.is_host && !isHost) {
+                            if (p.is_host && !isHost && !awaitingReclaimSync) {
                                 if (hostTransferTimers[uid]) clearTimeout(hostTransferTimers[uid]);
                                 hostTransferTimers[uid] = setTimeout(() => {
                                     delete hostTransferTimers[uid];
                                     const cur = window.currentPresenceState || {};
-                                    const hasHost = Object.values(cur).some(arr => arr.some(item => item.is_host));
-                                    if (!hasHost && !isHost) checkAndPromoteSelf();
+                                    if (!syncLib.hasOnlineHost(cur) && !isHost && !awaitingReclaimSync) {
+                                        checkAndPromoteSelf();
+                                    }
                                 }, HOST_TRANSFER_GRACE_MS);
                             }
                         });
@@ -2065,45 +2173,74 @@
         // ===========================================
         // HOST TRANSFER / KICK / KNOCK
         // ===========================================
-        function becomeTemporaryHost() {
+        function becomeTemporaryHost({ broadcastNotice = true } = {}) {
             if (isHost) return;
             isHost = true;
             isTempHost = true;
-            videoPlayer.playbackRate = 1.0;
+            isSyncing = false;
+            awaitingReclaimSync = false;
+            if (hostlessRoomTimer) { clearTimeout(hostlessRoomTimer); hostlessRoomTimer = null; }
+            if (pingRefreshInterval) { clearInterval(pingRefreshInterval); pingRefreshInterval = null; }
+            clockSamples = [];
+            clockOffsetMs = 0;
+
+            if (videoPlayer) videoPlayer.playbackRate = 1.0;
+            if (youtubePlayer && youtubePlayer.setPlaybackRate) {
+                try { youtubePlayer.setPlaybackRate(1); } catch (e) {}
+            }
+            if (playerType === 'youtube' && youtubePlayer && youtubePlayer.getCurrentTime) {
+                try {
+                    lastHostYtPos = youtubePlayer.getCurrentTime() || 0;
+                    lastHostYtSampleAt = Date.now();
+                    lastHostYtState = youtubePlayer.getPlayerState ? youtubePlayer.getPlayerState() : -1;
+                } catch (e) {}
+            }
+
             if (presenceChannel) window.watchParty.updatePresence(presenceChannel, { is_host: true });
             startHostTickLoop();
-            if (pingRefreshInterval) clearInterval(pingRefreshInterval);
             updateRoleUI();
             renderQueue();
+            renderBookmarks();
+
+            const snap = getPlaybackSnapshot();
+            if (syncChannel && playerType !== 'gdrive') {
+                hostTickSeq += 1;
+                window.watchParty.broadcastStatus(syncChannel, snap.status, snap.currentTime, { seq: hostTickSeq });
+                if (broadcastNotice) {
+                    window.watchParty.broadcastHostTransfer(syncChannel, currentUserId, currentUserName || 'Peserta');
+                }
+            }
+            updateStatusDisplay(snap.status);
             showSyncIndicator('Kamu menjadi host sementara karena host keluar.');
+            appendLocalSystemChat(`${currentUserName || 'Kamu'} sekarang menjadi host sementara.`);
         }
 
         function demoteFromHost() {
             if (!isTempHost) return;
             isHost = false;
             isTempHost = false;
+            isSyncing = false;
+            awaitingReclaimSync = false;
             if (hostTickInterval) { clearInterval(hostTickInterval); hostTickInterval = null; }
+            if (videoPlayer) videoPlayer.playbackRate = 1.0;
+            if (youtubePlayer && youtubePlayer.setPlaybackRate) {
+                try { youtubePlayer.setPlaybackRate(1); } catch (e) {}
+            }
             if (presenceChannel) window.watchParty.updatePresence(presenceChannel, { is_host: false });
             startClockCalibrationLoop();
             updateRoleUI();
             renderQueue();
+            renderBookmarks();
             showSyncIndicator('Host asli kembali. Peran kembali menjadi guest.');
         }
 
         function checkAndPromoteSelf() {
-            if (isHost) return;
+            if (isHost || awaitingReclaimSync) return;
             const cur = window.currentPresenceState || {};
-            const mine = cur[currentUserId];
-            if (!mine || !mine.length) return;
-            const myJoin = new Date(mine[0].joined_at).getTime();
-
-            const guests = Object.entries(cur)
-                .filter(([id]) => id !== currentUserId)
-                .map(([id, list]) => ({ id, joined: new Date(list[0].joined_at).getTime(), is_host: list[0].is_host }))
-                .filter(u => !u.is_host);
-
-            if (guests.length === 0 || myJoin <= Math.min(...guests.map(g => g.joined))) {
-                becomeTemporaryHost();
+            if (syncLib.hasOnlineHost(cur)) return;
+            const nextHost = syncLib.selectNextHostCandidate(cur);
+            if (nextHost && nextHost.id === currentUserId) {
+                becomeTemporaryHost({ broadcastNotice: true });
             }
         }
 
@@ -2233,11 +2370,223 @@
         }
 
         // ===========================================
-        // CHAT, LATE-JOIN SYNC & REACTIONS
+        // CHAT, NOTIFICATIONS, REPLIES & LATE-JOIN SYNC
         // ===========================================
+        function updateChatUnreadPill() {
+            const pill = document.getElementById('chatUnreadPill');
+            if (!pill) return;
+            if (unreadScrolledCount > 0) {
+                pill.textContent = `${unreadScrolledCount} baru`;
+                pill.style.display = 'inline-flex';
+            } else {
+                pill.style.display = 'none';
+            }
+        }
+
+        function scrollChatToBottom() {
+            const listEl = document.getElementById('chatMessages');
+            if (!listEl) return;
+            listEl.scrollTop = listEl.scrollHeight;
+            unreadScrolledCount = 0;
+            updateChatUnreadPill();
+        }
+
+        function updateChatNotifButtonUI() {
+            const btn = document.getElementById('chatNotifBtn');
+            if (!btn) return;
+            const nativeGranted = typeof Notification !== 'undefined' && Notification.permission === 'granted';
+            btn.classList.toggle('active', chatNotifEnabled);
+            if (!chatNotifEnabled) {
+                btn.textContent = 'Notif: Off';
+                btn.title = 'Aktifkan notifikasi chat saat pindah tab';
+            } else if (nativeGranted) {
+                btn.textContent = 'Notif: On';
+                btn.title = 'Notifikasi desktop, suara, dan tab aktif';
+            } else {
+                btn.textContent = 'Notif: Tab';
+                btn.title = 'Notifikasi suara & penanda judul tab aktif';
+            }
+        }
+
+        function playChatPing() {
+            try {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return;
+                if (!chatAudioCtx) chatAudioCtx = new AudioCtx();
+                if (chatAudioCtx.state === 'suspended') chatAudioCtx.resume().catch(() => {});
+                const now = chatAudioCtx.currentTime;
+                const osc = chatAudioCtx.createOscillator();
+                const gain = chatAudioCtx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(660, now);
+                osc.frequency.setValueAtTime(880, now + 0.08);
+                gain.gain.setValueAtTime(0.06, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+                osc.connect(gain);
+                gain.connect(chatAudioCtx.destination);
+                osc.start(now);
+                osc.stop(now + 0.25);
+            } catch (e) {}
+        }
+
+        async function toggleChatNotifications() {
+            if (chatNotifEnabled) {
+                chatNotifEnabled = false;
+                try { localStorage.setItem('watchparty_chat_notif', '0'); } catch (e) {}
+                updateChatNotifButtonUI();
+                showSyncIndicator('Notifikasi chat dimatikan.');
+                return;
+            }
+
+            try {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (AudioCtx) {
+                    if (!chatAudioCtx) chatAudioCtx = new AudioCtx();
+                    if (chatAudioCtx.state === 'suspended') await chatAudioCtx.resume().catch(() => {});
+                }
+            } catch (e) {}
+
+            chatNotifEnabled = true;
+            try { localStorage.setItem('watchparty_chat_notif', '1'); } catch (e) {}
+
+            if (typeof Notification === 'undefined') {
+                updateChatNotifButtonUI();
+                showSyncIndicator('Browser ini membatasi pop-up; notifikasi suara & judul tab aktif.');
+                return;
+            }
+
+            if (Notification.permission === 'default') {
+                try {
+                    const perm = await Notification.requestPermission();
+                    updateChatNotifButtonUI();
+                    if (perm === 'granted') {
+                        showSyncIndicator('Notifikasi chat & pindah tab aktif.');
+                    } else {
+                        showSyncIndicator('Izin pop-up ditolak; notifikasi suara & judul tab tetap aktif.');
+                    }
+                    return;
+                } catch (e) {}
+            }
+
+            updateChatNotifButtonUI();
+            if (Notification.permission === 'granted') {
+                showSyncIndicator('Notifikasi chat & pindah tab aktif.');
+            } else {
+                showSyncIndicator('Izin pop-up diblokir browser; notifikasi suara & judul tab tetap aktif.');
+            }
+        }
+
+        function notifyUserOffTab(title, body, { countUnread = true } = {}) {
+            const isAway = document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus());
+            if (!isAway) return;
+
+            if (countUnread) {
+                unreadChatCount += 1;
+                document.title = `(${unreadChatCount}) ${basePageTitle}`;
+            }
+
+            if (!chatNotifEnabled) return;
+            playChatPing();
+
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                try {
+                    if (activeChatNotification) activeChatNotification.close();
+                    activeChatNotification = new Notification(title || 'Watch Party', {
+                        body: body || '',
+                        icon: 'assets/logo.png',
+                        tag: `wp-chat-${roomId || 'room'}`,
+                        renotify: true,
+                    });
+                    activeChatNotification.onclick = () => {
+                        try { window.focus(); } catch (e) {}
+                        if (activeChatNotification) activeChatNotification.close();
+                    };
+                } catch (e) {}
+            }
+        }
+
+        function clearTabUnread() {
+            if (unreadChatCount > 0) {
+                unreadChatCount = 0;
+                document.title = basePageTitle;
+            }
+            if (activeChatNotification) {
+                try { activeChatNotification.close(); } catch (e) {}
+                activeChatNotification = null;
+            }
+        }
+
+        function appendLocalSystemChat(text) {
+            if (!text) return;
+            const listEl = document.getElementById('chatMessages');
+            if (!listEl) return;
+            const nearBottom = (listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight) <= 72;
+            const sys = document.createElement('div');
+            sys.className = 'chat-system';
+            sys.textContent = text;
+            listEl.appendChild(sys);
+            if (nearBottom) {
+                listEl.scrollTop = listEl.scrollHeight;
+            }
+            const isFs = document.fullscreenElement || document.webkitFullscreenElement || isIOSFakeFullscreen;
+            if (isFs) {
+                const fsWrap = document.getElementById('fullscreenChat');
+                const fsMsgs = document.getElementById('fullscreenChatMessages');
+                if (fsWrap && fsMsgs) {
+                    fsWrap.classList.add('show');
+                    const item = document.createElement('div');
+                    item.className = 'fullscreen-msg-item';
+                    item.textContent = text;
+                    fsMsgs.prepend(item);
+                    while (fsMsgs.children.length > 5) fsMsgs.lastChild.remove();
+                    setTimeout(() => { if (item.parentNode) item.remove(); }, 5000);
+                }
+            }
+        }
+
+        function setChatReply(message) {
+            if (!message) return;
+            const rawSnippet = typeof window.watchParty.censorBadWords === 'function'
+                ? window.watchParty.censorBadWords(message.text || '')
+                : (message.text || '');
+            const snippet = syncLib.truncateChatSnippet(rawSnippet, 90);
+            pendingReplyTo = {
+                id: message.id || null,
+                user_name: message.user_name || 'Guest',
+                text: snippet,
+            };
+            document.getElementById('chatReplyAuthor').textContent = `Membalas ${pendingReplyTo.user_name}`;
+            document.getElementById('chatReplyText').textContent = pendingReplyTo.text;
+            document.getElementById('chatReplyPreview').style.display = 'flex';
+            const input = document.getElementById('chatInput');
+            if (input) input.focus();
+        }
+
+        function clearChatReply() {
+            pendingReplyTo = null;
+            const preview = document.getElementById('chatReplyPreview');
+            if (preview) preview.style.display = 'none';
+        }
+
+        function jumpToOriginalChatMessage(msgId) {
+            if (!msgId) return;
+            const listEl = document.getElementById('chatMessages');
+            if (!listEl) return;
+            const rows = listEl.querySelectorAll('.chat-message[data-msg-id]');
+            for (const row of rows) {
+                if (row.dataset.msgId === msgId) {
+                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    row.classList.add('chat-message-highlight');
+                    setTimeout(() => row.classList.remove('chat-message-highlight'), 1600);
+                    return;
+                }
+            }
+            showSyncIndicator('Pesan asal sudah terlewat dari riwayat chat.');
+        }
+
         function subscribeToChatChannel() {
             chatChannel = window.watchParty.subscribeToChat(roomId, {
-                onMessage: (message) => displayChatMessage(message),
+                onMessage: (message) => displayChatMessage(message, false, { fromHistory: false }),
                 onChatRequest: () => {
                     if (isHost) {
                         const history = window.watchParty.getChatHistory(roomId);
@@ -2250,10 +2599,11 @@
                     if (isHost || !data || !Array.isArray(data.messages)) return;
                     const existing = window.watchParty.getChatHistory(roomId);
                     const merged = [...existing];
-                    const seen = new Set(existing.map(m => `${m.user_id}|${m.timestamp}|${m.text}`));
+                    const msgKey = (m) => m.id || `${m.user_id}|${m.timestamp}|${m.text}`;
+                    const seen = new Set(existing.map(msgKey));
                     let added = 0;
                     data.messages.forEach(m => {
-                        const key = `${m.user_id}|${m.timestamp}|${m.text}`;
+                        const key = msgKey(m);
                         if (!seen.has(key)) {
                             seen.add(key);
                             merged.push(m);
@@ -2278,11 +2628,14 @@
         function loadChatHistory() {
             const history = window.watchParty.getChatHistory(roomId);
             const chatMessagesEl = document.getElementById('chatMessages');
-            chatMessagesEl.innerHTML = '<div class="chat-system">Selamat datang di Watch Party. Jaga obrolan tetap nyaman.</div>';
+            const selfGreeting = currentUserName
+                ? `Selamat bergabung, ${currentUserName}! Jaga obrolan tetap nyaman.`
+                : 'Selamat datang di Watch Party. Jaga obrolan tetap nyaman.';
+            chatMessagesEl.innerHTML = `<div class="chat-system">${syncLib.escapeHtml(selfGreeting)}</div>`;
             history.forEach(message => {
                 chatMessagesEl.appendChild(createMessageElement(message, message.user_id === currentUserId));
             });
-            chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+            scrollChatToBottom();
         }
 
         function createMessageElement(message, isOwn) {
@@ -2295,6 +2648,7 @@
 
             const div = document.createElement('div');
             div.className = 'chat-message' + (isOwn ? ' own' : '');
+            if (message.id) div.dataset.msgId = String(message.id);
 
             const displayName = message.user_name || 'Guest';
             const initial = displayName.charAt(0).toUpperCase() || '?';
@@ -2305,16 +2659,44 @@
                 ? window.watchParty.censorBadWords(rawText)
                 : rawText;
 
+            let replyHtml = '';
+            if (message.reply_to && message.reply_to.text) {
+                const rAuthor = message.reply_to.user_name || 'Guest';
+                const rRaw = message.reply_to.text || '';
+                const rCensored = typeof window.watchParty.censorBadWords === 'function'
+                    ? window.watchParty.censorBadWords(rRaw)
+                    : rRaw;
+                replyHtml = `
+                    <button type="button" class="chat-reply-quote" title="Lihat pesan yang dibalas">
+                        <span class="chat-reply-quote-author">${syncLib.escapeHtml(rAuthor)}</span>
+                        <span class="chat-reply-quote-text">${syncLib.escapeHtml(rCensored)}</span>
+                    </button>
+                `;
+            }
+
             div.innerHTML = `
                 <div class="avatar ${message.is_host ? 'host' : ''}">${syncLib.escapeHtml(initial)}</div>
                 <div class="content">
                     <div class="username ${message.is_host ? 'host' : ''}">
-                        <span>${syncLib.escapeHtml(displayName)}${message.is_host ? ' (Host)' : ''}</span>
-                        <span class="time">${timeStr}</span>
+                        <span class="chat-meta-left">
+                            <span>${syncLib.escapeHtml(displayName)}${message.is_host ? ' (Host)' : ''}</span>
+                            <span class="time">${timeStr}</span>
+                        </span>
+                        <button type="button" class="chat-reply-btn" title="Balas pesan ini">Balas</button>
                     </div>
+                    ${replyHtml}
                     <div class="text">${syncLib.escapeHtml(censored)}</div>
                 </div>
             `;
+
+            const replyBtn = div.querySelector('.chat-reply-btn');
+            if (replyBtn) {
+                replyBtn.addEventListener('click', () => setChatReply(message));
+            }
+            const quoteBtn = div.querySelector('.chat-reply-quote');
+            if (quoteBtn && message.reply_to && message.reply_to.id) {
+                quoteBtn.addEventListener('click', () => jumpToOriginalChatMessage(message.reply_to.id));
+            }
             return div;
         }
 
@@ -2336,16 +2718,19 @@
             }
 
             const message = {
+                id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
                 user_id: currentUserId,
                 user_name: currentUserName || 'Guest',
                 text: text,
                 is_host: isHost,
                 timestamp: Date.now(),
+                ...(pendingReplyTo ? { reply_to: pendingReplyTo } : {}),
             };
             window.watchParty.saveChatMessage(roomId, message);
             window.watchParty.sendChatMessage(chatChannel, message);
-            displayChatMessage(message, true);
+            displayChatMessage(message, true, { fromHistory: false });
 
+            clearChatReply();
             input.value = '';
             if (isTyping) {
                 isTyping = false;
@@ -2361,14 +2746,29 @@
             }
         });
 
-        function displayChatMessage(message, isOwn = false) {
+        function displayChatMessage(message, isOwn = false, opts = {}) {
             const isFromMe = isOwn || message.user_id === currentUserId;
             chatMessages.push(message);
             if (chatMessages.length > 50) chatMessages.shift();
 
             const listEl = document.getElementById('chatMessages');
+            const nearBottom = (listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight) <= 72;
             listEl.appendChild(createMessageElement(message, isFromMe));
-            listEl.scrollTop = listEl.scrollHeight;
+
+            if (isFromMe || nearBottom) {
+                listEl.scrollTop = listEl.scrollHeight;
+                unreadScrolledCount = 0;
+                updateChatUnreadPill();
+            } else if (!message.is_system) {
+                unreadScrolledCount += 1;
+                updateChatUnreadPill();
+            }
+
+            const rawText = message.text || '';
+            const censored = typeof window.watchParty.censorBadWords === 'function'
+                ? window.watchParty.censorBadWords(rawText)
+                : rawText;
+            const sender = message.user_name || 'Guest';
 
             const isFs = document.fullscreenElement || document.webkitFullscreenElement || isIOSFakeFullscreen;
             if (isFs && !message.is_system) {
@@ -2377,11 +2777,18 @@
                 fsWrap.classList.add('show');
                 const item = document.createElement('div');
                 item.className = 'fullscreen-msg-item';
-                const censored = window.watchParty.censorBadWords(message.text || '');
-                item.textContent = `${message.user_name || 'Guest'}: ${censored}`;
+                const prefix = message.reply_to && message.reply_to.user_name
+                    ? `${sender} (membalas ${message.reply_to.user_name})`
+                    : sender;
+                item.textContent = `${prefix}: ${censored}`;
                 fsMsgs.prepend(item);
                 while (fsMsgs.children.length > 5) fsMsgs.lastChild.remove();
                 setTimeout(() => { if (item.parentNode) item.remove(); }, 5000);
+            }
+
+            if (!opts.fromHistory && !isFromMe && !message.is_system) {
+                const body = syncLib.truncateChatSnippet(censored, 110);
+                notifyUserOffTab(`${sender} - Watch Party`, body, { countUnread: true });
             }
         }
 
@@ -3119,7 +3526,19 @@
         function copyShareUrl() { copyTextValue(shareUrlInput.value, 'Link room disalin.'); }
         function copyRoomId() { copyTextValue(roomIdInput.value, 'Kode room disalin.'); }
 
-        function goHome() {
+        async function goHome() {
+            isLeavingPage = true;
+            if (isHost && syncChannel) {
+                const nextHost = syncLib.selectNextHostCandidate(window.currentPresenceState || {}, [currentUserId]);
+                if (nextHost) {
+                    try {
+                        await Promise.race([
+                            window.watchParty.broadcastHostTransfer(syncChannel, nextHost.id, nextHost.name),
+                            new Promise(r => setTimeout(r, 180)),
+                        ]);
+                    } catch (e) {}
+                }
+            }
             try { localStorage.removeItem('watchparty_current_room_id'); } catch (e) {}
             window.location.href = 'index.html';
         }
@@ -3254,10 +3673,11 @@
             } catch (e) {}
         }, { once: true });
 
-        // Keyboard Escape closes non-blocking modals & viewers drawer
+        // Keyboard Escape closes non-blocking modals, reply bar & viewers drawer
         document.addEventListener('keydown', (e) => {
             if (e.key !== 'Escape') return;
             if (isIOSFakeFullscreen) exitIOSFakeFullscreen();
+            clearChatReply();
             hideBookmarkModal();
             hideQueueModal();
             closeShareModal();
@@ -3269,18 +3689,15 @@
         window.addEventListener('beforeunload', () => {
             isLeavingPage = true;
             if (isHost && syncChannel) {
-                const state = window.currentPresenceState || {};
-                const guests = Object.entries(state)
-                    .filter(([id]) => id !== currentUserId)
-                    .map(([id, p]) => ({ id, name: p[0]?.user_name || 'Guest', joined: p[0]?.joined_at || '' }))
-                    .sort((a, b) => new Date(a.joined) - new Date(b.joined));
-                if (guests.length > 0) {
-                    window.watchParty.broadcastHostTransfer(syncChannel, guests[0].id, guests[0].name);
+                const nextHost = syncLib.selectNextHostCandidate(window.currentPresenceState || {}, [currentUserId]);
+                if (nextHost) {
+                    window.watchParty.broadcastHostTransfer(syncChannel, nextHost.id, nextHost.name);
                 }
             }
             [hostTickInterval, pingRefreshInterval, guestDbBackupInterval, youtubeTimeInterval, expiryTimerInterval]
                 .filter(Boolean)
                 .forEach(clearInterval);
+            [hostReclaimFallbackTimer, hostlessRoomTimer].filter(Boolean).forEach(clearTimeout);
             if (activeBlobUrl) URL.revokeObjectURL(activeBlobUrl);
             try { VoiceChat.destroy(); } catch (e) {}
             if (presenceChannel) window.watchParty.unsubscribeFromPresence(presenceChannel);
@@ -3291,13 +3708,28 @@
             if (subscription) window.watchParty.unsubscribeFromRoom(subscription);
         });
 
+        window.addEventListener('focus', clearTabUnread);
+
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && !isHost && syncChannel && playerType !== 'gdrive') {
-                window.watchParty.broadcastSyncRequest(syncChannel);
+            if (!document.hidden) {
+                clearTabUnread();
+                if (!isHost && syncChannel && playerType !== 'gdrive') {
+                    window.watchParty.broadcastSyncRequest(syncChannel);
+                }
             }
         });
 
         document.addEventListener('DOMContentLoaded', () => {
+            updateChatNotifButtonUI();
+            const chatBox = document.getElementById('chatMessages');
+            if (chatBox) {
+                chatBox.addEventListener('scroll', () => {
+                    if ((chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight) <= 72 && unreadScrolledCount > 0) {
+                        unreadScrolledCount = 0;
+                        updateChatUnreadPill();
+                    }
+                });
+            }
             bindVoiceButtonHold();
             init();
         });
